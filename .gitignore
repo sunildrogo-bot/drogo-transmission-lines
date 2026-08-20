@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+
+# secrets
+.env
+
+# local db / uploads
+instance/
+static/uploads/
+*.db
+
+# python env
+venv/
+.venv/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+
