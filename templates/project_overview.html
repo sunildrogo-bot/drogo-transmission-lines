@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Project Overview{% endblock %}
+
+{% block head %}
+<style>
+  .cdv-page{min-height:100vh;display:flex;flex-direction:column;background:var(--bg-base);}
+  .cdv-content{flex:1;padding:28px 44px 50px;width:100%;}
+
+  .cdv-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px;padding-bottom:22px;border-bottom:1px solid var(--border-soft);flex-wrap:wrap;}
+  .cdv-header-left{display:flex;align-items:center;gap:16px;}
+  .cdv-header-icon{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent-light,var(--accent)));display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 4px 14px rgba(0,0,0,.12);}
+  .cdv-header-icon svg{width:24px;height:24px;color:#fff;}
+  .cdv-title{font-size:23px;font-weight:800;color:var(--text-primary);letter-spacing:-.01em;line-height:1.2;}
+  .cdv-header-chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+  .cdv-chip{font-size:11px;font-weight:600;color:var(--text-secondary);background:var(--bg-elevated);border:1px solid var(--border);padding:4px 11px;border-radius:20px;}
+
+  .cdv-hero{display:flex;gap:20px;padding:2px 0 36px;margin-bottom:4px;align-items:flex-start;flex-wrap:wrap;}
+  .cdv-pie-block, .cdv-bar-block{flex:1;min-width:280px;}
+  .cdv-overview-col{flex:0 0 260px;margin-left:auto;max-height:420px;overflow-y:auto;}
+  .cdv-hero-box{border:1px solid var(--border-soft);border-radius:var(--radius-lg);padding:20px 22px;display:flex;flex-direction:column;}
+  .cdv-overview-col .cdv-hero-box{border:none;border-radius:0;padding:0;}
+  .cdv-hero-heading{font-size:14px;font-weight:800;color:var(--text-primary);margin-bottom:2px;}
+  .cdv-hero-sub{font-size:11.5px;color:var(--text-muted);margin-bottom:18px;}
+
+  .cdv-pie-row{display:flex;align-items:center;justify-content:center;gap:22px;flex-wrap:wrap;}
+  .cdv-pie{position:relative;flex-shrink:0;width:180px;height:180px;border-radius:50%;}
+  .cdv-pie-hole{position:absolute;inset:26%;background:var(--bg-base);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  .cdv-pie-hole-value{font-size:28px;font-weight:800;color:var(--text-primary);line-height:1;}
+  .cdv-pie-hole-label{font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-top:4px;}
+  .cdv-pie-legend{display:flex;flex-direction:column;gap:4px;}
+  .cdv-legend-row{display:flex;align-items:center;gap:11px;padding:8px 14px 8px 10px;border-radius:10px;border-left:3px solid transparent;}
+  .cdv-legend-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0;}
+  .cdv-legend-count{font-size:18px;font-weight:800;color:var(--text-primary);line-height:1;min-width:24px;}
+  .cdv-legend-label{font-size:12px;color:var(--text-secondary);font-weight:600;}
+  .cdv-legend-pct{font-size:11px;color:var(--text-muted);margin-left:auto;padding-left:16px;}
+
+  .cdv-bar-chart{display:flex;align-items:flex-end;justify-content:center;gap:22px;height:210px;flex:1;overflow-x:auto;padding:0 4px;}
+  .cdv-bar-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;cursor:pointer;width:60px;flex-shrink:0;text-decoration:none;color:inherit;}
+  .cdv-bar-col.active .cdv-bar-fill{opacity:1;background:var(--text-primary);}
+  .cdv-bar-col.active .cdv-bar-label{color:var(--text-primary);}
+  .cdv-bar-track{flex:1;width:100%;display:flex;align-items:flex-end;justify-content:center;}
+  .cdv-bar-fill{width:44px;border-radius:8px 8px 3px 3px;min-height:6px;background:var(--accent);opacity:.65;transition:opacity .15s,width .15s;}
+  .cdv-bar-col:hover .cdv-bar-fill{opacity:.85;}
+  .cdv-bar-count{font-size:17px;font-weight:800;color:var(--text-primary);margin-top:10px;}
+  .cdv-bar-label{font-size:10.5px;color:var(--text-muted);font-weight:600;margin-top:2px;text-align:center;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cdv-bar-empty{margin:auto;font-size:12px;color:var(--text-muted);}
+
+  .cdv-overview-section{padding:14px 0;border-bottom:1px solid var(--border-soft);}
+  .cdv-overview-section:first-child{padding-top:0;}
+  .cdv-overview-section:last-child{border-bottom:none;padding-bottom:0;}
+  .cdv-stat-value{font-size:20px;font-weight:800;color:var(--text-primary);}
+  .cdv-stat-label{font-size:11.5px;color:var(--text-muted);margin-top:3px;}
+
+  .cdv-empty{padding:60px;text-align:center;color:var(--text-muted);font-size:13px;}
+  .cdv-section-label{font-size:13px;font-weight:800;color:var(--text-primary);margin-bottom:14px;}
+  .cdv-section-label.spaced{margin-top:36px;}
+
+  /* Division-wise breakdown table */
+  .cdv-div-table{width:100%;border-collapse:collapse;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:8px;}
+  .cdv-div-table th{text-align:left;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);font-weight:800;padding:11px 16px;border-bottom:2px solid var(--accent);background:var(--bg-elevated-2);}
+  .cdv-div-table td{padding:10px 16px;border-bottom:1px solid var(--border-soft);font-size:12.5px;color:var(--text-secondary);}
+  .cdv-div-table tr:last-child td{border-bottom:none;}
+  .cdv-div-table td.cdv-div-name{font-weight:700;color:var(--text-primary);}
+  .cdv-div-table td.num{text-align:center;font-weight:700;color:var(--text-primary);}
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="cdv-page">
+  <nav class="navbar">
+    <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
+    <div class="nav-actions">
+      <div class="nav-user">{{ project.module }} <span>/ {{ project.name }}</span></div>
+      <a href="{{ url_for('projects_bp.project_map', project_id=project.id) }}" class="btn-ghost">← Map</a>
+    </div>
+  </nav>
+
+  <div class="cdv-content">
+    <div class="cdv-header">
+      <div class="cdv-header-left">
+        <div class="cdv-header-icon">
+          <svg viewBox="0 0 24 24" fill="none"><line x1="12" y1="2" x2="12" y2="22" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/><line x1="12" y1="6" x2="4" y2="11" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/><line x1="12" y1="6" x2="20" y2="11" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/><line x1="4" y1="11" x2="20" y2="11" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/></svg>
+        </div>
+        <div>
+          <div class="cdv-title">{{ project.name }}</div>
+          <div class="cdv-header-chips">
+            {% if project.client_name %}<span class="cdv-chip">{{ project.client_name }}</span>{% endif %}
+            {% if project.state %}<span class="cdv-chip">{{ project.state }}</span>{% endif %}
+            {% if project.timeline %}<span class="cdv-chip">{{ project.timeline }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <a href="{{ url_for('projects_bp.project_defects_by_tower', project_id=project.id) }}" class="btn-ghost" style="text-decoration:none;">🗼 Tower-wise Defects</a>
+        <a href="{{ url_for('projects_bp.project_defect_report', project_id=project.id) }}" target="_blank" class="btn-primary" style="text-decoration:none;">📄 Generate Report</a>
+      </div>
+    </div>
+
+    <div class="cdv-hero">
+      <div class="cdv-pie-block">
+        <div class="cdv-hero-box">
+          <div class="cdv-hero-heading">Defects by Severity</div>
+          <div class="cdv-hero-sub">Across every division and line in this project</div>
+          <div class="cdv-pie-row">
+            <div class="cdv-pie" style="background:{{ severity_pie_gradient }};">
+              <div class="cdv-pie-hole">
+                <div class="cdv-pie-hole-value">{{ total_defects }}</div>
+                <div class="cdv-pie-hole-label">Total</div>
+              </div>
+            </div>
+            <div class="cdv-pie-legend">
+              {% for sev, color in [('Critical','var(--danger)'), ('Major','#e0a53a'), ('Minor','var(--success)')] %}
+              <div class="cdv-legend-row" data-sev="{{ sev }}">
+                <span class="cdv-legend-dot" style="background:{{ color }};"></span>
+                <span class="cdv-legend-count">{{ severity_counts[sev] }}</span>
+                <span class="cdv-legend-label">{{ sev }}</span>
+                <span class="cdv-legend-pct">{{ ((severity_counts[sev] / total_defects * 100) | round | int) if total_defects else 0 }}%</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cdv-bar-block">
+        <div class="cdv-hero-box">
+          <div class="cdv-hero-heading">Defects by Division</div>
+          <div class="cdv-hero-sub">Which divisions have the most findings so far</div>
+          <div class="cdv-bar-chart">
+            {% if division_bars %}
+              {% for bar in division_bars %}
+              <div class="cdv-bar-col" title="{{ bar.name }}">
+                <div class="cdv-bar-track"><div class="cdv-bar-fill" style="height:{{ bar.pct }}%;"></div></div>
+                <div class="cdv-bar-count">{{ bar.count }}</div>
+                <div class="cdv-bar-label">{{ bar.name }}</div>
+              </div>
+              {% endfor %}
+            {% else %}
+              <div class="cdv-bar-empty">No defects marked yet.</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="cdv-overview-col">
+        <div class="cdv-hero-box">
+          <div class="cdv-hero-heading">Project Overview</div>
+          <div class="cdv-hero-sub">&nbsp;</div>
+          <div class="cdv-overview-section">
+            <div class="cdv-stat-value">{{ division_count }}</div>
+            <div class="cdv-stat-label">Division{{ 's' if division_count != 1 }} added{% if project.planned_divisions %} of {{ project.planned_divisions }} planned{% endif %}</div>
+          </div>
+          <div class="cdv-overview-section">
+            <div class="cdv-stat-value">{{ line_count }}</div>
+            <div class="cdv-stat-label">Line{{ 's' if line_count != 1 }} added</div>
+          </div>
+          <div class="cdv-overview-section">
+            <div class="cdv-stat-value">{{ tower_count }}</div>
+            <div class="cdv-stat-label">Tower{{ 's' if tower_count != 1 }} total{% if project.planned_towers %} of {{ project.planned_towers }} planned{% endif %}</div>
+          </div>
+          <div class="cdv-overview-section">
+            <div class="cdv-stat-value">{{ towers_photographed }}</div>
+            <div class="cdv-stat-label">Tower{{ 's' if towers_photographed != 1 }} with photos</div>
+          </div>
+          <div class="cdv-overview-section">
+            <div class="cdv-stat-value">{{ total_defects }}</div>
+            <div class="cdv-stat-label">Defect{{ 's' if total_defects != 1 }} marked</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cdv-section-label spaced">Defects by Type</div>
+    <div class="cdv-hero-box" style="margin-bottom:28px;">
+      <div class="cdv-hero-sub">One bar per defect type that's actually been marked — Anti Climbing Device, Arcing Horn, etc.</div>
+      <div class="cdv-bar-chart">
+        {% if defect_type_bars %}
+          {% for bar in defect_type_bars %}
+          <a class="cdv-bar-col" href="{{ url_for('projects_bp.project_defects_by_type', project_id=project.id, defect_type=bar.name) }}" title="{{ bar.name }}">
+            <div class="cdv-bar-track"><div class="cdv-bar-fill" style="height:{{ bar.pct }}%;"></div></div>
+            <div class="cdv-bar-count">{{ bar.count }}</div>
+            <div class="cdv-bar-label">{{ bar.name }}</div>
+          </a>
+          {% endfor %}
+        {% else %}
+          <div class="cdv-bar-empty">No defects marked yet.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="cdv-section-label">By Division</div>
+    {% if division_stats %}
+    <table class="cdv-div-table">
+      <thead>
+        <tr><th>Division</th><th style="text-align:center;">Lines</th><th style="text-align:center;">Towers</th><th style="text-align:center;">Defects</th></tr>
+      </thead>
+      <tbody>
+        {% for ds in division_stats %}
+        <tr>
+          <td class="cdv-div-name">{{ ds.name }}</td>
+          <td class="num">{{ ds.line_count }}</td>
+          <td class="num">{{ ds.tower_count }}</td>
+          <td class="num">{{ ds.defect_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="cdv-empty">No divisions added yet.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

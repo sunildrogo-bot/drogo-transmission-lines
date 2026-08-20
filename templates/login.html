@@ -1,0 +1,563 @@
+{% extends "base.html" %}
+{% block title %}Login — Drogo{% endblock %}
+
+{% block body %}
+<style>
+
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+}
+
+.navbar{
+    position:fixed;
+    top:0;
+    left:0;
+    right:0;
+    z-index:50;
+
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+
+    padding:16px 40px;
+
+    background:rgba(255,255,255,.7);
+    backdrop-filter:blur(14px);
+    border-bottom:1px solid rgba(0,0,0,.05);
+}
+
+.nav-brand{
+    display:flex;
+    align-items:center;
+    gap:10px;
+
+    text-decoration:none;
+    color:#2f3640;
+
+    font-size:15px;
+    font-weight:700;
+    letter-spacing:1px;
+}
+
+.nav-brand-logo{
+    height:30px;
+    width:auto;
+    display:block;
+}
+
+.nav-actions{
+    list-style:none;
+    display:flex;
+    align-items:center;
+    gap:28px;
+}
+
+.nav-actions a{
+    text-decoration:none;
+    color:#555;
+    font-size:14px;
+    font-weight:600;
+    transition:.25s;
+}
+
+.nav-actions a:hover{
+    color:#7dc7f7;
+}
+
+.login-split{
+    min-height:100vh;
+    display:flex;
+}
+
+.login-visual{
+    flex:1.15;
+    max-width:760px;
+    position:relative;
+    display:none;
+    flex-direction:column;
+    justify-content:space-between;
+    padding:52px;
+    color:#fff;
+    overflow:hidden;
+    background:#000;
+}
+
+.login-visual img{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    filter:grayscale(100%) contrast(1.08) brightness(.72);
+}
+
+.login-visual::before{
+    content:'';
+    position:absolute;
+    inset:0;
+    background:linear-gradient(190deg, rgba(0,0,0,.1) 0%, rgba(0,0,0,.78) 100%);
+}
+
+.lv-top, .lv-bottom{
+    position:relative;
+    z-index:2;
+}
+
+.lv-top .lv-mark{
+    font-family:Georgia, 'Times New Roman', serif;
+    font-size:12px;
+    letter-spacing:.32em;
+    text-transform:uppercase;
+    color:rgba(255,255,255,.8);
+}
+
+.lv-bottom h2{
+    font-family:Georgia, 'Times New Roman', serif;
+    font-style:italic;
+    font-weight:400;
+    font-size:30px;
+    line-height:1.25;
+    max-width:420px;
+    margin-bottom:14px;
+}
+
+.lv-bottom p{
+    font-size:12.5px;
+    letter-spacing:.02em;
+    line-height:1.7;
+    color:rgba(255,255,255,.65);
+    max-width:380px;
+    text-transform:uppercase;
+}
+
+.login-form-panel{
+    flex:1;
+    min-width:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#fff;
+    padding:40px 24px;
+}
+
+.login-form-inner{
+    width:100%;
+    max-width:360px;
+}
+
+@media(min-width:900px){
+    .login-visual{display:flex;}
+}
+
+.login-form-inner h1{
+    font-family:Georgia, 'Times New Roman', serif;
+    font-size:28px;
+    font-weight:400;
+    color:#000;
+    margin-bottom:8px;
+    transition:.3s;
+}
+
+.login-form-inner .lfi-sub{
+    color:#6b6f76;
+    font-size:12.5px;
+    letter-spacing:.03em;
+    line-height:1.6;
+    margin-bottom:30px;
+    transition:.3s;
+}
+
+/* Toggle */
+
+.role-card{
+    padding:0;
+    margin-bottom:20px;
+}
+
+.role-toggle{
+    position:relative;
+    display:flex;
+    background:#fff;
+    border:1px solid #000;
+    border-radius:0;
+    padding:0;
+    margin-bottom:26px;
+}
+
+.role-toggle::before{
+    content:'';
+    position:absolute;
+    top:0;
+    left:0;
+
+    width:25%;
+    height:100%;
+
+    background:#000;
+    border-radius:0;
+
+    transition:all .3s ease;
+}
+
+.role-toggle.admin::before{
+    transform:translateX(100%);
+}
+
+.role-toggle.pilot::before{
+    transform:translateX(200%);
+}
+
+.role-toggle.sme::before{
+    transform:translateX(300%);
+}
+
+.role-toggle input{
+    display:none;
+}
+
+.role-toggle label{
+    position:relative;
+    flex:1;
+    text-align:center;
+    padding:11px 4px;
+    cursor:pointer;
+    z-index:1;
+    font-weight:600;
+    font-size:10.5px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:#000;
+    user-select:none;
+    transition:.3s;
+    border-right:1px solid #000;
+}
+
+.role-toggle label:last-child{
+    border-right:none;
+}
+
+.role-toggle label.active{
+    color:#fff;
+}
+
+.input-group{
+    margin-bottom:16px;
+}
+
+.credentials-section{
+    padding-top:2px;
+}
+
+.credentials-section .input-group label{
+    color:#555;
+}
+
+.input-group label{
+    display:block;
+    margin-bottom:8px;
+    color:#000;
+    font-size:10.5px;
+    font-weight:600;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+}
+
+.input-wrap{
+    position:relative;
+}
+
+.input-wrap svg{
+    position:absolute;
+    left:0;
+    top:50%;
+    transform:translateY(-50%);
+    width:16px;
+    height:16px;
+    color:#000;
+    pointer-events:none;
+    transition:opacity .2s;
+    opacity:.55;
+}
+
+.input-wrap input{
+    width:100%;
+    padding:10px 4px 10px 26px;
+
+    border:none;
+    border-bottom:1px solid #c9c9c9;
+    border-radius:0;
+    background:transparent;
+
+    font-size:14px;
+    outline:none;
+
+    transition:border-color .2s;
+}
+
+.input-wrap input:focus{
+    border-color:#000;
+}
+
+.input-wrap input:focus ~ svg,
+.input-wrap:focus-within svg{
+    opacity:1;
+}
+
+.login-btn{
+    width:100%;
+    height:50px;
+
+    border:none;
+    border-radius:0;
+
+    background:#000;
+    color:white;
+
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+
+    margin-top:14px;
+
+    cursor:pointer;
+    transition:.2s;
+}
+
+.login-btn:active{
+    background:#2a2a2a;
+}
+
+.login-btn:hover{
+    transform:translateY(-2px);
+}
+
+.error-msg{
+    background:#fdeaea;
+    color:#c0392b;
+    border:1px solid #f3c4c4;
+    border-radius:10px;
+    padding:10px 12px;
+    margin-bottom:18px;
+    font-size:13px;
+}
+
+@media(max-width:600px){
+
+    .navbar{
+        padding:14px 20px;
+    }
+
+    .nav-brand{
+        font-size:13px;
+    }
+
+    .login-form-panel{
+        padding-top:78px;
+    }
+
+    .login-form-inner h1{
+        font-size:22px;
+    }
+}
+
+</style>
+
+<nav class="navbar">
+    <a href="{{ url_for('home') }}" class="nav-brand">
+        <img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace">
+    </a>
+
+    <ul class="nav-actions">
+        <li><a href="{{ url_for('home') }}">Home</a></li>
+    </ul>
+</nav>
+
+<div class="login-split">
+
+    <div class="login-visual">
+        <img src="{{ url_for('static', filename='images/hero/hero_login.jpg') }}" alt="Transmission tower, low-angle view">
+        <div class="lv-top"><span class="lv-mark">Drogo Aerospace</span></div>
+        <div class="lv-bottom">
+            <h2>"See the grid before it fails."</h2>
+            <p>Drone-based RGB and thermal inspection of high-voltage transmission corridors — every tower marked, measured, and reported from one platform.</p>
+        </div>
+    </div>
+
+    <div class="login-form-panel">
+    <div class="login-form-inner" id="loginCard">
+
+        <h1 id="loginTitle">Welcome Back</h1>
+        <p class="lfi-sub" id="loginSubtitle">
+            Sign in to access the Drogo Aerospace inspection platform.
+        </p>
+
+        {% if error %}
+        <div class="error-msg">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('login') }}">
+
+            <div class="role-card" id="roleCard">
+
+                <div class="role-toggle" id="roleToggle">
+
+                    <input
+                        type="radio"
+                        name="login_as"
+                        id="role-client"
+                        value="Client User"
+                        {% if login_as not in ('Admin', 'Pilot', 'SME') %}checked{% endif %}
+                    >
+
+                    <label for="role-client">
+                        Client
+                    </label>
+
+                    <input
+                        type="radio"
+                        name="login_as"
+                        id="role-admin"
+                        value="Admin"
+                        {% if login_as == 'Admin' %}checked{% endif %}
+                    >
+
+                    <label for="role-admin">
+                        Admin
+                    </label>
+
+                    <input
+                        type="radio"
+                        name="login_as"
+                        id="role-pilot"
+                        value="Pilot"
+                        {% if login_as == 'Pilot' %}checked{% endif %}
+                    >
+
+                    <label for="role-pilot">
+                        Pilot
+                    </label>
+
+                    <input
+                        type="radio"
+                        name="login_as"
+                        id="role-sme"
+                        value="SME"
+                        {% if login_as == 'SME' %}checked{% endif %}
+                    >
+
+                    <label for="role-sme">
+                        SME
+                    </label>
+
+                </div>
+
+                <div class="credentials-section">
+
+
+                    <div class="input-group">
+                        <label>Email</label>
+                        <div class="input-wrap">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/><path d="m3 6 9 7 9-7"/></svg>
+                            <input
+                                type="email"
+                                name="email"
+                                placeholder="you@example.com"
+                                required
+                            >
+                        </div>
+                    </div>
+
+                    <div class="input-group">
+                        <label>Password</label>
+                        <div class="input-wrap">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+                            <input
+                                type="password"
+                                name="password"
+                                placeholder="••••••••"
+                                required
+                            >
+                        </div>
+                    </div>
+
+                </div>
+
+                <button
+                    type="submit"
+                    class="login-btn"
+                    id="loginBtn"
+                >
+                    Sign In
+                </button>
+
+            </div>
+
+        </form>
+
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+
+const clientRadio = document.getElementById('role-client');
+const adminRadio  = document.getElementById('role-admin');
+const pilotRadio  = document.getElementById('role-pilot');
+const smeRadio    = document.getElementById('role-sme');
+
+const roleToggle = document.getElementById('roleToggle');
+const loginCard  = document.getElementById('loginCard');
+
+const title      = document.getElementById('loginTitle');
+const subtitle   = document.getElementById('loginSubtitle');
+
+const labelClient = document.querySelector('label[for="role-client"]');
+const labelAdmin  = document.querySelector('label[for="role-admin"]');
+const labelPilot  = document.querySelector('label[for="role-pilot"]');
+const labelSme    = document.querySelector('label[for="role-sme"]');
+
+
+function updateRole(){
+    const labels = { client: labelClient, admin: labelAdmin, pilot: labelPilot, sme: labelSme };
+    Object.values(labels).forEach(l => l.classList.remove('active'));
+    roleToggle.classList.remove('admin', 'pilot', 'sme');
+
+    if (adminRadio.checked) {
+        roleToggle.classList.add('admin');
+        title.textContent = "Admin Portal";
+        subtitle.textContent = "Sign in to manage Drogo Aerospace administration and platform controls.";
+        labelAdmin.classList.add('active');
+    } else if (pilotRadio.checked) {
+        roleToggle.classList.add('pilot');
+        title.textContent = "Pilot Portal";
+        subtitle.textContent = "Sign in to see your assigned inspection work.";
+        labelPilot.classList.add('active');
+    } else if (smeRadio.checked) {
+        roleToggle.classList.add('sme');
+        title.textContent = "SME Portal";
+        subtitle.textContent = "Sign in to inspect your assigned lines.";
+        labelSme.classList.add('active');
+    } else {
+        title.textContent = "Welcome Back";
+        subtitle.textContent = "Sign in to access the Drogo Aerospace inspection platform.";
+        labelClient.classList.add('active');
+    }
+}
+
+clientRadio.addEventListener('change', updateRole);
+adminRadio.addEventListener('change', updateRole);
+smeRadio.addEventListener('change', updateRole);
+pilotRadio.addEventListener('change', updateRole);
+
+updateRole();
+
+</script>
+
+{% endblock %}

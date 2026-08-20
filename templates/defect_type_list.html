@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}{{ defect_type }} — {{ project.name }}{% endblock %}
+
+{% block head %}
+<style>
+  .dtl-page{min-height:100vh;display:flex;flex-direction:column;background:var(--bg-base);}
+  .dtl-content{flex:1;padding:28px 44px 50px;width:100%;max-width:1100px;margin:0 auto;}
+
+  .dtl-back{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--text-secondary);text-decoration:none;margin-bottom:18px;}
+  .dtl-back:hover{color:var(--text-primary);}
+
+  .dtl-header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:26px;padding-bottom:20px;border-bottom:1px solid var(--border-soft);flex-wrap:wrap;}
+  .dtl-title{font-size:23px;font-weight:800;color:var(--text-primary);letter-spacing:-.01em;}
+  .dtl-count{font-size:13px;color:var(--text-muted);margin-top:4px;}
+
+  .dtl-table-wrap{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);overflow-x:auto;box-shadow:0 1px 3px rgba(27,30,36,.05);}
+  .dtl-table{width:100%;border-collapse:collapse;}
+  .dtl-table th{text-align:left;vertical-align:bottom;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);font-weight:800;padding:12px 16px;border-bottom:2px solid var(--accent);background:var(--bg-elevated-2);white-space:nowrap;}
+  .dtl-table td{padding:11px 16px;border-bottom:1px solid var(--border-soft);font-size:12.5px;color:var(--text-secondary);vertical-align:middle;}
+  .dtl-table tbody tr:last-child td{border-bottom:none;}
+  .dtl-td-img img{width:40px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer;}
+  .dtl-td-title{font-weight:700;color:var(--text-primary);}
+  .dtl-sev-tag{font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap;}
+  .dtl-sev-tag.sev-Critical{background:rgba(201,75,66,.12);color:var(--danger);}
+  .dtl-sev-tag.sev-Major{background:rgba(224,165,58,.15);color:#a06a1a;}
+  .dtl-sev-tag.sev-Minor{background:rgba(31,157,104,.12);color:var(--success);}
+  .dtl-empty{padding:60px;text-align:center;color:var(--text-muted);font-size:13px;}
+
+  .dtl-img-lightbox{display:none;position:fixed;inset:0;background:rgba(6,8,12,.9);z-index:2000;align-items:center;justify-content:center;}
+  .dtl-img-lightbox.open{display:flex;}
+  .dtl-img-lightbox-wrap{position:relative;display:inline-block;max-width:88vw;max-height:88vh;line-height:0;}
+  .dtl-img-lightbox-wrap img{display:block;max-width:88vw;max-height:88vh;border-radius:6px;box-shadow:0 20px 60px rgba(0,0,0,.5);}
+  .dtl-img-lightbox-wrap svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+  .dtl-img-lightbox-wrap svg .shape{fill:rgba(224,20,20,.12);stroke:#e01414;stroke-width:.4;vector-effect:non-scaling-stroke;}
+  .dtl-img-lightbox-close{position:absolute;top:20px;right:24px;background:rgba(255,255,255,.1);border:none;color:#fff;width:36px;height:36px;border-radius:50%;font-size:16px;cursor:pointer;}
+  .dtl-img-lightbox-close:hover{background:rgba(255,255,255,.22);}
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="dtl-page">
+  <nav class="navbar">
+    <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
+    <div class="nav-actions">
+      <div class="nav-user">{{ project.module }} <span>/ {{ project.name }}</span></div>
+      <a href="{{ url_for('projects_bp.project_map', project_id=project.id) }}" class="btn-ghost">← Map</a>
+    </div>
+  </nav>
+
+  <div class="dtl-content">
+    <a href="{{ url_for('projects_bp.project_overview', project_id=project.id) }}" class="dtl-back">&larr; Back to Overview</a>
+
+    <div class="dtl-header">
+      <div>
+        <div class="dtl-title">{{ defect_type }}</div>
+        <div class="dtl-count">{{ defects|length }} defect{{ 's' if defects|length != 1 }} across this project</div>
+      </div>
+    </div>
+
+    {% if defects %}
+    <div class="dtl-table-wrap">
+      <table class="dtl-table">
+        <thead>
+          <tr>
+            <th style="width:52px;">Image</th><th>Component</th><th>Tower</th><th>Position</th><th>Severity</th><th>Status</th><th>Marked</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in defects %}
+          <tr>
+            <td class="dtl-td-img">{% if d.image_url %}<img src="{{ d.image_url }}" alt="" data-shape-type="{{ d.shape_type or '' }}" data-shape-coords='{{ d.shape_coords | tojson }}' onclick="openDtlLightbox(this)"/>{% else %}—{% endif %}</td>
+            <td class="dtl-td-title">{{ d.component_name or '—' }}</td>
+            <td>{{ d.division_name }} · {{ d.line_name }} · Tower {{ d.tower_label }}</td>
+            <td>{{ d.location or '—' }}</td>
+            <td><span class="dtl-sev-tag sev-{{ d.severity }}">{{ d.severity }}</span></td>
+            <td>{{ d.status or '—' }}</td>
+            <td>{{ d.created_at.strftime('%d %b %Y') if d.created_at else '—' }}{% if d.created_by %} · {{ d.created_by }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="dtl-empty">No defects of this type have been marked yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="dtl-img-lightbox" id="dtl-img-lightbox" onclick="if(event.target===this) closeDtlLightbox()">
+  <button class="dtl-img-lightbox-close" onclick="closeDtlLightbox()" title="Close">✕</button>
+  <div class="dtl-img-lightbox-wrap">
+    <img id="dtl-img-lightbox-img" src="" alt=""/>
+    <svg id="dtl-img-lightbox-svg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function openDtlLightbox(imgEl) {
+    document.getElementById('dtl-img-lightbox-img').src = imgEl.src;
+    document.getElementById('dtl-img-lightbox').classList.add('open');
+
+    const svg = document.getElementById('dtl-img-lightbox-svg');
+    svg.innerHTML = '';
+    const shapeType = imgEl.dataset.shapeType;
+    let coords = [];
+    try { coords = JSON.parse(imgEl.dataset.shapeCoords || '[]'); } catch (e) { coords = []; }
+    const el = buildDtlShapeEl(shapeType, coords);
+    if (el) { el.setAttribute('class', 'shape'); svg.appendChild(el); }
+  }
+
+  function buildDtlShapeEl(shapeType, coords) {
+    const ns = 'http://www.w3.org/2000/svg';
+    if (shapeType === 'polygon' && coords.length >= 3) {
+      const el = document.createElementNS(ns, 'polygon');
+      el.setAttribute('points', coords.map(p => `${p.x},${p.y}`).join(' '));
+      return el;
+    }
+    if (shapeType === 'rect' && coords.length === 2) {
+      const [a, b] = coords;
+      const el = document.createElementNS(ns, 'rect');
+      el.setAttribute('x', Math.min(a.x, b.x));
+      el.setAttribute('y', Math.min(a.y, b.y));
+      el.setAttribute('width', Math.abs(b.x - a.x));
+      el.setAttribute('height', Math.abs(b.y - a.y));
+      return el;
+    }
+    if (shapeType === 'circle' && coords.length === 2) {
+      const [c, edge] = coords;
+      const r = Math.hypot(edge.x - c.x, edge.y - c.y);
+      const el = document.createElementNS(ns, 'circle');
+      el.setAttribute('cx', c.x);
+      el.setAttribute('cy', c.y);
+      el.setAttribute('r', r);
+      return el;
+    }
+    return null;
+  }
+  function closeDtlLightbox() {
+    document.getElementById('dtl-img-lightbox').classList.remove('open');
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeDtlLightbox();
+  });
+</script>
+{% endblock %}

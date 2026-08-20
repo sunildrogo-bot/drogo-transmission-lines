@@ -1,0 +1,369 @@
+{% extends "base.html" %}
+{% set hide_ai_chat = true %}
+{% block title %}Drogo Aerospace — Transmission Line Inspection{% endblock %}
+
+{% block head %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F0E4;--paper-2:#EDE3D2;--ink:#241C16;--muted:#7B6E5F;
+    --dark:#1E1712;--dark-ink:#F2EADD;--dark-muted:#A9998A;
+    --amber:#0FA98A;--cyan:#46CDB0;--teal:#0A8E75;--brass:#B8894A;--line:rgba(36,28,22,0.14);
+  }
+  .home-page *{box-sizing:border-box;}
+  .home-page{background:var(--paper);color:var(--ink);font-family:'Inter',sans-serif;font-weight:300;overflow-x:hidden;}
+  .home-page a{color:inherit;text-decoration:none;}
+  .home-page .serif{font-family:'Cormorant Garamond',serif;}
+  .home-page .mono{font-family:'IBM Plex Mono',monospace;}
+  .home-page .label{font-size:11px;letter-spacing:0.24em;text-transform:uppercase;}
+
+  .home-page .subnav{position:fixed;top:0;left:0;right:0;z-index:70;display:flex;align-items:center;justify-content:space-between;gap:30px;padding:12px 40px;background:rgba(20,15,11,0.5);backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);border-bottom:1px solid rgba(242,234,221,0.1);transition:background .3s ease,border-color .3s ease;}
+  .home-page .subnav .nav-mark{display:flex;align-items:center;gap:10px;}
+  .home-page .subnav .nav-mark img{height:34px;width:auto;display:block;}
+  .home-page .subnav .nav-links{display:flex;align-items:center;gap:30px;}
+  .home-page .subnav a{cursor:pointer;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--dark-ink);opacity:0.78;position:relative;padding-bottom:3px;}
+  .home-page .subnav a:hover{opacity:1;}
+  .home-page .subnav a::after{content:"";position:absolute;left:0;bottom:0;width:0;height:1px;background:var(--cyan);transition:width .3s;}
+  .home-page .subnav a:hover::after{width:100%;}
+  .home-page .subnav .cta{border:1px solid rgba(242,234,221,0.45);padding:9px 18px;border-radius:20px;opacity:1;color:var(--dark-ink);}
+  .home-page .subnav .cta:hover{border-color:var(--cyan);color:var(--cyan);}
+  .home-page .subnav .cta::after{display:none;}
+  @media(max-width:820px){.home-page .subnav .nav-links a:not(.cta){display:none;}.home-page .subnav{padding:10px 20px;}.home-page .subnav .nav-mark img{height:28px;}}
+
+  .home-page .hero{position:relative;height:100vh;min-height:640px;overflow:hidden;display:flex;align-items:flex-end;background:var(--dark);color:var(--dark-ink);}
+  .home-page .hero .bg{position:absolute;inset:0;}
+  .home-page .hero-mosaic{display:grid;grid-template-columns:repeat(6,1fr);grid-template-rows:repeat(2,1fr);gap:2px;background:var(--dark);}
+  .home-page .hero-mosaic .tile{position:relative;overflow:hidden;}
+  .home-page .hero-mosaic .tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;filter:grayscale(22%) contrast(1.1) brightness(.9) saturate(1.05);transition:transform 6s cubic-bezier(.19,1,.22,1),filter .6s ease;will-change:transform;}
+  .home-page .hero-mosaic .tile:hover img{transform:scale(1.08);filter:grayscale(8%) contrast(1.14) brightness(.96) saturate(1.12);}
+  .home-page .hm-a{grid-column:1/3;grid-row:1/3;}
+  .home-page .hm-a img{object-position:center 30%;}
+  .home-page .hm-b{grid-column:3/4;grid-row:1/2;}
+  .home-page .hm-c{grid-column:4/6;grid-row:1/2;}
+  .home-page .hm-c img{object-position:25% 55%;}
+  .home-page .hm-f{grid-column:6/7;grid-row:1/2;}
+  .home-page .hm-f img{object-position:center 30%;}
+  .home-page .hm-d{grid-column:3/5;grid-row:2/3;}
+  .home-page .hm-e{grid-column:5/7;grid-row:2/3;}
+  .home-page .hm-e img{object-position:center 70%;}
+  @media(max-width:760px){
+    .home-page .hero-mosaic{grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);}
+    .home-page .hm-a{grid-column:1/4;grid-row:1/2;}
+    .home-page .hm-b{grid-column:1/2;grid-row:2/3;}
+    .home-page .hm-c{grid-column:2/4;grid-row:2/3;}
+    .home-page .hm-f{grid-column:1/2;grid-row:3/4;}
+    .home-page .hm-d{grid-column:2/3;grid-row:3/4;}
+    .home-page .hm-e{grid-column:3/4;grid-row:3/4;}
+  }
+  .home-page .hero .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(24,18,14,0.15) 40%,rgba(24,18,14,0.82) 100%);z-index:1;}
+  .home-page .hero .cap{position:relative;z-index:3;padding:0 40px 60px;}
+  .home-page .hero .label{margin-bottom:22px;color:var(--cyan);}
+  .home-page .hero h1{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:clamp(36px,7vw,90px);line-height:0.95;text-transform:uppercase;}
+  .home-page .hero h1 em{font-style:italic;color:var(--amber);}
+  .home-page .hero .tagline{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:500;font-size:clamp(20px,2.6vw,30px);line-height:1.1;color:var(--dark-ink);margin:14px 0 0;letter-spacing:.01em;}
+  .home-page .hero .tagline::after{content:"";display:block;width:54px;height:2px;background:var(--teal);margin-top:16px;}
+  .home-page .hero .lede{max-width:460px;font-size:15px;line-height:1.7;color:#DAD0C0;margin-top:20px;}
+  .home-page .disc{display:inline-flex;align-items:center;gap:12px;margin-top:28px;font-size:12px;letter-spacing:0.16em;text-transform:uppercase;border-bottom:1px solid rgba(234,240,242,0.6);padding-bottom:6px;transition:gap .3s;}
+  .home-page .disc:hover{gap:20px;}
+
+  .home-page .intro{text-align:center;max-width:800px;margin:0 auto;padding:100px 30px;}
+  .home-page .intro .label{margin-bottom:22px;color:var(--teal);}
+  .home-page .intro h2{font-family:'Cormorant Garamond',serif;font-weight:400;font-size:clamp(26px,4vw,48px);line-height:1.16;}
+  .home-page .intro h2 em{font-style:italic;color:var(--amber);}
+  .home-page .intro p{color:var(--muted);font-size:15px;line-height:1.8;margin-top:22px;}
+
+  .home-page .specs{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--paper);}
+  .home-page .specs div{padding:56px 24px;text-align:center;border-right:1px solid var(--line);}
+  .home-page .specs div:last-child{border-right:none;}
+  .home-page .specs .n{font-family:'Cormorant Garamond',serif;font-size:clamp(30px,3.6vw,50px);font-weight:500;color:var(--teal);}
+  .home-page .specs .l{font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);margin-top:10px;}
+  @media(max-width:700px){.home-page .specs{grid-template-columns:1fr 1fr;}.home-page .specs div:nth-child(2){border-right:none;}.home-page .specs div:nth-child(1),.home-page .specs div:nth-child(2){border-bottom:1px solid var(--line);}}
+  .home-page .specs-sm{max-width:760px;margin:0 auto;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--paper-2);}
+  .home-page .specs-sm div{padding:20px 14px;}
+  .home-page .specs-sm .n{font-size:clamp(20px,2.2vw,26px);}
+  .home-page .specs-sm .l{font-size:9.5px;letter-spacing:0.1em;margin-top:6px;}
+  @media(max-width:700px){.home-page .specs-sm{grid-template-columns:1fr 1fr;}}
+
+  .home-page .contact-sec{padding:clamp(70px,9vw,120px) 28px;background:var(--paper);}
+  .home-page .contact-inner{max-width:560px;margin:0 auto;}
+  .home-page .contact-head{text-align:center;margin-bottom:52px;}
+  .home-page .contact-head .label{margin-bottom:18px;color:var(--brass);}
+  .home-page .contact-head h2{font-family:'Cormorant Garamond',serif;font-style:italic;font-weight:500;font-size:clamp(28px,4vw,44px);color:var(--ink);}
+  .home-page .contact-head p{color:var(--muted);font-size:14px;margin-top:14px;}
+  .home-page .contact-form{background:transparent;border:none;padding:0;}
+  .home-page .cf-row{display:grid;grid-template-columns:1fr 1fr;gap:28px;}
+  .home-page .cf-field{margin-bottom:30px;}
+  .home-page .cf-field label{display:block;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink);font-weight:600;margin-bottom:10px;}
+  .home-page .cf-field label span{text-transform:none;letter-spacing:0;color:var(--muted);opacity:.7;font-weight:400;}
+  .home-page .cf-field input,
+  .home-page .cf-field textarea{width:100%;padding:8px 2px;border:none;border-bottom:1px solid rgba(36,28,22,.28);border-radius:0;background:transparent;font-family:inherit;font-size:15px;color:var(--ink);outline:none;transition:border-color .2s;resize:vertical;}
+  .home-page .cf-field input:focus,
+  .home-page .cf-field textarea:focus{border-color:var(--ink);}
+  .home-page .cf-error{display:none;color:#b23b2e;font-size:13px;margin-bottom:14px;}
+  .home-page .cf-error.show{display:block;}
+  .home-page .cf-submit{width:100%;padding:16px;border:1px solid var(--ink);background:transparent;color:var(--ink);font-size:12px;letter-spacing:.16em;text-transform:uppercase;cursor:pointer;transition:background .3s,color .3s;margin-top:6px;}
+  .home-page .cf-submit:hover{background:var(--ink);color:var(--paper);}
+  .home-page .cf-submit:disabled{opacity:.5;cursor:default;}
+  .home-page .cf-success{display:none;text-align:center;font-size:13.5px;color:var(--teal);margin-top:20px;}
+  .home-page .cf-success.show{display:block;}
+  .home-page .contact-form.submitted .cf-field,
+  .home-page .contact-form.submitted .cf-submit{display:none;}
+  @media(max-width:600px){.home-page .cf-row{grid-template-columns:1fr;}}
+
+  .home-page .modes-ed{max-width:1240px;margin:0 auto;padding:clamp(60px,9vw,120px) 28px;}
+  .home-page .modes-head{max-width:640px;margin:0 auto clamp(46px,6vw,86px);text-align:center;}
+  .home-page .modes-head .eyebrow{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--brass);}
+  .home-page .modes-head h2{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:clamp(32px,5vw,56px);line-height:1.02;margin:16px 0 0;color:var(--ink);}
+  .home-page .modes-head h2 em{font-style:italic;color:var(--teal);}
+  .home-page .modes-head .lede{font-size:15px;line-height:1.7;color:var(--muted);margin:20px auto 0;max-width:520px;}
+  .home-page .mrow{display:grid;grid-template-columns:1.15fr 1fr;gap:clamp(28px,5vw,72px);align-items:center;padding:clamp(30px,4vw,52px) 0;border-top:1px solid rgba(184,137,74,.28);text-decoration:none;color:inherit;cursor:pointer;scroll-margin-top:76px;}
+  .home-page .mrow:first-of-type{border-top:none;}
+  .home-page .mrow.rev{direction:rtl;}
+  .home-page .mrow.rev>*{direction:ltr;}
+  .home-page .mphoto{position:relative;aspect-ratio:16/10;overflow:hidden;border-radius:3px;background:var(--dark);box-shadow:0 24px 60px -28px rgba(40,28,18,.55),0 2px 8px -4px rgba(40,28,18,.25);}
+  .home-page .mphoto::after{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);border-radius:3px;pointer-events:none;}
+  .home-page .mphoto img{width:100%;height:100%;object-fit:cover;display:block;transition:transform 1.2s cubic-bezier(.2,.7,.2,1);}
+  .home-page .mrow:hover .mphoto img{transform:scale(1.05);}
+  .home-page .mtext .mnum{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.24em;color:var(--brass);}
+  .home-page .mtext h3{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:clamp(28px,3.4vw,46px);line-height:1;text-transform:uppercase;margin:14px 0 0;color:var(--ink);}
+  .home-page .mtext p{font-size:14px;line-height:1.7;color:var(--muted);margin:16px 0 0;max-width:400px;}
+  .home-page .mtext .cta{display:inline-flex;align-items:center;gap:10px;margin-top:22px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink);border-bottom:1px solid var(--brass);padding-bottom:4px;transition:gap .25s,color .25s;}
+  .home-page .mrow:hover .mtext .cta{gap:18px;color:var(--brass);}
+  @media(max-width:760px){.home-page .mrow,.home-page .mrow.rev{grid-template-columns:1fr;direction:ltr;gap:22px;}}
+
+  .home-page .band{position:relative;height:60vh;min-height:400px;display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden;background:radial-gradient(90% 120% at 70% 20%,#16293A,#0A141C 70%);color:var(--dark-ink);}
+  .home-page .band .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,20,28,0.2),rgba(10,20,28,0.5));}
+  .home-page .band .cap{position:relative;z-index:2;padding:0 30px;}
+  .home-page .band .label{margin-bottom:24px;color:var(--cyan);}
+  .home-page .band h2{font-family:'Cormorant Garamond',serif;font-weight:400;font-size:clamp(28px,5vw,64px);line-height:1.06;text-transform:uppercase;}
+  .home-page .band h2 em{font-style:italic;color:var(--amber);}
+
+  .home-page .invite{text-align:center;padding:110px 30px;background:var(--paper);}
+  .home-page .invite .label{margin-bottom:22px;color:var(--teal);}
+  .home-page .invite h2{font-family:'Cormorant Garamond',serif;font-weight:400;font-size:clamp(28px,4.6vw,58px);line-height:1.08;text-transform:uppercase;max-width:760px;margin:0 auto;}
+  .home-page .invite h2 em{font-style:italic;color:var(--amber);}
+  .home-page .invite p{color:var(--muted);font-size:14px;margin-top:18px;}
+  .home-page .invite .btn{display:inline-block;margin-top:32px;border:1px solid var(--ink);color:var(--ink);padding:16px 40px;font-size:12px;letter-spacing:0.16em;text-transform:uppercase;transition:background .3s,color .3s;}
+  .home-page .invite .btn:hover{background:var(--ink);color:var(--paper);}
+
+  .home-page footer{background:var(--dark);color:var(--dark-ink);padding:54px 40px 32px;}
+  .home-page .f-top{display:flex;justify-content:space-between;flex-wrap:wrap;gap:30px;margin-bottom:40px;}
+  .home-page .f-top .fbrand{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:19px;letter-spacing:0.14em;text-transform:uppercase;color:var(--dark-ink);}
+  .home-page .f-top p{color:var(--dark-muted);font-size:13px;line-height:1.7;max-width:320px;margin-top:12px;}
+  .home-page .f-links{display:flex;gap:34px;flex-wrap:wrap;}
+  .home-page .f-links a{font-size:12px;letter-spacing:.06em;color:rgba(234,240,242,0.85);}
+  .home-page .f-links a:hover{color:var(--amber);}
+  .home-page .f-bot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;border-top:1px solid rgba(234,240,242,0.14);padding-top:20px;font-family:'IBM Plex Mono';font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:var(--dark-muted);}
+
+  .home-page .reveal{opacity:0;transform:translateY(24px);transition:opacity 1s,transform 1s;}
+  .home-page .reveal.in{opacity:1;transform:none;}
+  @media(prefers-reduced-motion:reduce){.home-page .reveal{opacity:1;transform:none;}.home-page .mrow:hover .mphoto img{transform:none;}}
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="home-page">
+
+  <div class="subnav">
+    <a href="{{ url_for('home') }}" class="nav-mark"><img src="{{ url_for('static', filename='images/drogo_logo_full_light.png') }}" alt="Drogo Aerospace"></a>
+    <div class="nav-links">
+      <a href="#rgb">RGB</a>
+      <a href="#thermal">Thermal</a>
+      <a href="#roles">Platform</a>
+      {% if session.get('user_id') %}
+      <a href="{{ url_for('logout') }}" class="cta">Logout</a>
+      {% else %}
+      <a href="{{ url_for('login') }}" class="cta">Login</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <section class="hero">
+    <div class="bg hero-mosaic">
+      <div class="tile hm-a"><img src="{{ url_for('static', filename='images/hero/hero_2.jpg') }}" alt="Transmission tower rising against an open sky" loading="eager" fetchpriority="high"></div>
+      <div class="tile hm-b"><img src="{{ url_for('static', filename='images/hero/hero_1.jpg') }}" alt="Looking up through a transmission tower's lattice" loading="eager"></div>
+      <div class="tile hm-c"><img src="{{ url_for('static', filename='images/hero/hero_6.jpg') }}" alt="Transmission towers across an open field at dusk" loading="eager"></div>
+      <div class="tile hm-d"><img src="{{ url_for('static', filename='images/hero/hero_4.jpg') }}" alt="Transmission line corridor stretching into the distance" loading="eager"></div>
+      <div class="tile hm-e"><img src="{{ url_for('static', filename='images/hero/hero_3.jpg') }}" alt="Utility poles and transmission lines across a desert landscape" loading="eager"></div>
+      <div class="tile hm-f"><img src="{{ url_for('static', filename='images/hero/hero_5.jpg') }}" alt="Insulator strings on a transmission tower" loading="eager"></div>
+    </div>
+    <div class="veil"></div>
+    <div class="cap">
+      <div class="label">Transmission Line Inspection</div>
+      <h1>Smarter Inspections.<br>Safer <em>Transmission</em>.</h1>
+      <p class="tagline">See the grid before it fails.</p>
+      <p class="lede">Drone-based RGB and thermal inspection of high-voltage transmission corridors — every tower marked, measured, and reported from one platform.</p>
+      <a href="#modes" class="disc">See how it works &rarr;</a>
+    </div>
+  </section>
+
+  <div class="intro reveal">
+    <div class="label">The Inspection Workflow</div>
+    <h2>One flight, two ways of reading a tower &mdash; <em>what you can see, and what you can't</em>.</h2>
+    <p>Pilots capture RGB and thermal imagery in the field. Every photo is matched to its exact tower by GPS, marked up for defects or hotspots, and rolled into a report &mdash; without ever leaving the platform.</p>
+  </div>
+
+  <section class="modes-ed reveal" id="modes">
+    <div class="modes-head">
+      <span class="eyebrow">Sensor Suite</span>
+      <h2>Two ways to <em>see</em> a tower.</h2>
+      <p class="lede">Every tower is captured on both channels &mdash; one surfacing physical damage, the other surfacing heat nothing else would catch.</p>
+    </div>
+
+    <a class="mrow" id="rgb" href="{{ url_for('login') }}">
+      <div class="mphoto"><img src="{{ url_for('static', filename='images/marketing_rgb.jpg') }}" alt="RGB tower inspection photo"></div>
+      <div class="mtext">
+        <div class="mnum">01 &middot; Visual</div>
+        <h3>RGB Inspection</h3>
+        <p>High-resolution imagery of every tower. Corrosion, cracked insulators, missing hardware, and structural wear &mdash; marked directly on the photo with component, severity, and status.</p>
+        <span class="cta">Log in to inspect &rarr;</span>
+      </div>
+    </a>
+
+    <a class="mrow rev" id="thermal" href="{{ url_for('login') }}">
+      <div class="mphoto"><img src="{{ url_for('static', filename='images/marketing_thermal.jpg') }}" alt="Thermal tower inspection photo"></div>
+      <div class="mtext">
+        <div class="mnum">02 &middot; Radiometric</div>
+        <h3>Thermal Inspection</h3>
+        <p>Real radiometric temperature readings, not just a heat-mapped photo. Point, rectangle, or line measurements with adjustable emissivity and ambient conditions &mdash; flagging hotspots before they become failures.</p>
+        <span class="cta">Log in to inspect &rarr;</span>
+      </div>
+    </a>
+  </section>
+
+  <section class="band">
+    <div class="veil"></div>
+    <div class="cap">
+      <div class="label">Built For The Field</div>
+      <h2>From <em>drone</em> to report,<br>without leaving the platform.</h2>
+    </div>
+  </section>
+
+  <div class="intro reveal" id="roles" style="padding-top:100px;">
+    <div class="label">One Platform, Four Roles</div>
+    <h2>Everyone on the inspection sees <em>exactly what they need</em>.</h2>
+    <p>Admins manage projects and generate reports. Pilots get routed to each tower and mark it done in the field. Remote experts inspect assigned lines without ever touching an upload button. Clients see results the moment a tower is signed off &mdash; nothing before.</p>
+  </div>
+
+  <div class="invite reveal">
+    <div class="label">Get Started</div>
+    <h2>Sign in to your <em>inspection workspace</em>.</h2>
+    <p>Admin, Pilot, SME, or Client &mdash; one login, scoped to what you're there to do.</p>
+    <a href="{{ url_for('login') }}" class="btn">Login &rarr;</a>
+  </div>
+
+  <div class="specs specs-sm reveal">
+    <div><div class="n">2</div><div class="l">Inspection Modes</div></div>
+    <div><div class="n">4</div><div class="l">Platform Roles</div></div>
+    <div><div class="n">70m</div><div class="l">GPS Match Radius</div></div>
+    <div><div class="n">100%</div><div class="l">Radiometric Thermal</div></div>
+  </div>
+
+  <section class="contact-sec reveal" id="contact">
+    <div class="contact-inner">
+      <div class="contact-head">
+        <div class="label">Get In Touch</div>
+        <h2>Have a project in mind?</h2>
+        <p>Send a quick note and we'll get back to you &mdash; no account needed.</p>
+      </div>
+
+      <form class="contact-form" id="contactForm">
+        <div class="cf-row">
+          <div class="cf-field">
+            <label for="cf-name">Name</label>
+            <input type="text" id="cf-name" name="name" required>
+          </div>
+          <div class="cf-field">
+            <label for="cf-email">Email</label>
+            <input type="email" id="cf-email" name="email" required>
+          </div>
+        </div>
+        <div class="cf-field">
+          <label for="cf-company">Company <span>(optional)</span></label>
+          <input type="text" id="cf-company" name="company">
+        </div>
+        <div class="cf-field">
+          <label for="cf-message">Message</label>
+          <textarea id="cf-message" name="message" rows="4" required></textarea>
+        </div>
+        <div class="cf-error" id="cfError"></div>
+        <button type="submit" class="cf-submit" id="cfSubmit">Send Message</button>
+        <div class="cf-success" id="cfSuccess">Thanks — we've received your message and will be in touch shortly.</div>
+      </form>
+    </div>
+  </section>
+
+  <footer>
+    <div class="f-top">
+      <div>
+        <div class="fbrand">Drogo Aerospace</div>
+        <p>Drone-based infrastructure inspection for power transmission &mdash; built for RGB and thermal inspection of high-voltage corridors.</p>
+      </div>
+      <div class="f-links">
+        <a href="#rgb">RGB</a>
+        <a href="#thermal">Thermal</a>
+        <a href="#roles">Platform</a>
+        <a href="{{ url_for('login') }}">Login</a>
+      </div>
+    </div>
+    <div class="f-bot">
+      <span>&copy; Drogo Aerospace</span>
+      <span>Transmission Line Inspection Platform</span>
+    </div>
+  </footer>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('in'); });
+  }, { threshold: 0.15 });
+  document.querySelectorAll('.home-page .reveal').forEach(el => io.observe(el));
+
+  const form = document.getElementById('contactForm');
+  const errBox = document.getElementById('cfError');
+  const successBox = document.getElementById('cfSuccess');
+  const submitBtn = document.getElementById('cfSubmit');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errBox.classList.remove('show');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending…';
+
+    try {
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: document.getElementById('cf-name').value.trim(),
+          email: document.getElementById('cf-email').value.trim(),
+          company: document.getElementById('cf-company').value.trim(),
+          message: document.getElementById('cf-message').value.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        errBox.textContent = data.error || 'Something went wrong — please try again.';
+        errBox.classList.add('show');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Send Message';
+        return;
+      }
+      form.classList.add('submitted');
+      successBox.classList.add('show');
+    } catch (err) {
+      errBox.textContent = 'Could not reach the server — please try again.';
+      errBox.classList.add('show');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send Message';
+    }
+  });
+})();
+</script>
+{% endblock %}
