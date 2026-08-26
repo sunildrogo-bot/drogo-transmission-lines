@@ -12,17 +12,37 @@ system shared by every module:
 Register in app.py with: app.register_blueprint(projects_bp)
 """
 import os
+import shutil
 import math
 import json
 import re
 import hashlib
+import csv
+import io
 import numpy as np
 from datetime import datetime, timedelta
-from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app
+from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app, Response
 from werkzeug.utils import secure_filename
-from models import db, Project, Division, Line, ActivityLog, TowerPhoto, TowerDefect, TowerReport, User, TowerInspectionStatus, PilotAssignment, ThermalPoint, CorridorPhoto, SmeAssignment, PilotLocation
+from models import db, Project, Division, Line, ActivityLog, TowerPhoto, TowerDefect, DefectResolutionEvent, TowerReport, AiInspectionSummary, User, TowerInspectionStatus, PilotAssignment, ThermalPoint, CorridorPhoto, SmeAssignment, PilotLocation, UploadBatch, UploadBatchItem
+from access_control import (
+    can_access_division,
+    can_access_line,
+    can_access_photo,
+    can_access_project,
+    client_can_access_tower,
+    has_module_access,
+    visible_line_ids,
+    visible_project_ids,
+)
 import settings as app_settings
 import thermal_decode
+from storage_cleanup import (
+    collect_division_files,
+    collect_line_files,
+    collect_project_files,
+    delete_stored_files,
+)
+from notification_service import admin_user_ids, notify_user, notify_users
 
 projects_bp = Blueprint('projects_bp', __name__)
 
@@ -48,6 +68,31 @@ def _admin_guard():
         return guard
     if session.get('role') != 'Admin':
         return jsonify({'error': 'Your account has view-only access to this module.'}), 403
+    return None
+
+
+def _cleanup_deleted_files(stored_paths, entity_label):
+    """Remove tracked files after the owning database rows are committed."""
+    cleanup = delete_stored_files(stored_paths)
+    if cleanup['errors']:
+        current_app.logger.warning(
+            'File cleanup after deleting %s was incomplete: %s',
+            entity_label,
+            cleanup['errors'],
+        )
+    return cleanup
+
+
+def _admin_or_client_guard():
+    """For actions Client sessions get a real write ability for, unlike
+    everything else in this module — right now just closing a defect
+    once it's been rectified in the field, since that's a real-world
+    fact both the client and Drogo need to be able to record."""
+    guard = _login_guard()
+    if guard:
+        return guard
+    if session.get('role') not in ('Admin', 'Client User'):
+        return jsonify({'error': 'This action is only available to Admin and Client accounts.'}), 403
     return None
 
 
@@ -101,18 +146,9 @@ def _inspect_guard_for_photo(tower_photo_id):
     return _inspect_guard(photo.line_id)
 
 
-def _visible_project_ids(module_name):
-    """None means "no restriction, show every project in this module" —
-    Admin sessions always get this, and so does a Client User who hasn't
-    had any specific projects assigned for this module (the
-    backward-compatible default). Otherwise, the set of project IDs this
-    Client User is actually allowed to see."""
-    if session.get('role') == 'Admin':
-        return None
-    user = User.query.get(session.get('user_id'))
-    if not user:
-        return set()  # no valid session user — show nothing rather than guess
-    return user.restricted_project_ids_for_module(module_name)
+def _visible_project_ids(module_name=None):
+    """Compatibility wrapper used by routes and the Gemini assistant."""
+    return visible_project_ids(module_name)
 
 
 def _project_access_guard(project):
@@ -121,10 +157,87 @@ def _project_access_guard(project):
     actually goes through the list; this closes the gap for anyone who
     has (or guesses) a direct link to a project they're not allowed to
     see. Returns a Flask response to abort with, or None if access is OK."""
-    allowed_ids = _visible_project_ids(project.module)
-    if allowed_ids is not None and project.id not in allowed_ids:
+    if not can_access_project(project):
         return jsonify({'error': "You don't have access to this project."}), 403
     return None
+
+
+# ── Project-access guards for the JSON API ─────────────────────────────────────
+# The page routes (map/overview/info) call _project_access_guard directly, but
+# most /api/... data endpoints take a division/line/photo/report id and only
+# checked _login_guard — so a Client User restricted to one project could read
+# another project's data by guessing ids (IDOR). These resolve whatever id the
+# endpoint has up to its owning Project and apply the same project-access check.
+# Admin bypasses these checks. Client access is project-based; Pilot and SME
+# access is derived from exact line assignments. Call at the top of an endpoint:
+#     guard = _line_access_guard(line_id)
+#     if guard: return guard
+def _project_access_guard_by_id(project_id):
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found.'}), 404
+    return _project_access_guard(project)
+
+
+def _division_access_guard(division_id):
+    division = Division.query.get(division_id)
+    if not division:
+        return jsonify({'error': 'Division not found.'}), 404
+    if not can_access_division(division):
+        return jsonify({'error': "You don't have access to this division."}), 403
+    return None
+
+
+def _line_access_guard(line_id):
+    line = Line.query.get(line_id)
+    if not line:
+        return jsonify({'error': 'Line not found.'}), 404
+    if not can_access_line(line):
+        return jsonify({'error': "You haven't been assigned access to this line."}), 403
+    return None
+
+
+def _photo_access_guard(photo_id):
+    photo = TowerPhoto.query.get(photo_id)
+    if not photo:
+        return jsonify({'error': 'Photo not found.'}), 404
+    if not can_access_photo(photo):
+        return jsonify({'error': "You don't have access to this photo."}), 403
+    return None
+
+
+def _client_tower_release_guard(line_id, tower_label):
+    if not client_can_access_tower(line_id, tower_label):
+        return jsonify({'error': 'Inspection results for this tower have not been released yet.'}), 403
+    return None
+
+
+def _client_photo_release_guard(photo):
+    return _client_tower_release_guard(photo.line_id, photo.tower_label)
+
+
+def _module_access_guard(module_name):
+    if not module_name:
+        return None
+    if not has_module_access(module_name):
+        return jsonify({'error': "You don't have access to this module."}), 403
+    return None
+
+
+def _visible_division_dict(division):
+    data = division.to_dict()
+    if session.get('role') in ('Pilot', 'SME'):
+        data['line_count'] = sum(1 for line in division.lines if can_access_line(line))
+    return data
+
+
+def _visible_project_dict(project):
+    data = project.to_dict()
+    if session.get('role') in ('Pilot', 'SME'):
+        lines = [line for division in project.divisions for line in division.lines if can_access_line(line)]
+        data['line_count'] = len(lines)
+        data['division_count'] = len({line.division_id for line in lines})
+    return data
 
 
 def _ext_ok(filename, allowed):
@@ -151,6 +264,150 @@ def _save_upload(file_storage, subfolder, allowed_exts):
         i += 1
     file_storage.save(os.path.join(folder_fs, final_name))
     return f"uploads/{subfolder}/{final_name}"
+
+
+def _generate_thumbnail(base_dir, subfolder_raw, filename):
+    """Create a high-quality grid thumbnail without touching the original."""
+    from PIL import Image, ImageOps
+    raw_dir = os.path.normpath(os.path.join(base_dir, UPLOAD_BASE, subfolder_raw))
+    raw_full_path = os.path.join(raw_dir, filename)
+    thumb_dir = os.path.join(os.path.dirname(raw_dir), 'thumb')
+    thumb_subfolder = os.path.relpath(thumb_dir, os.path.join(base_dir, UPLOAD_BASE)).replace('\\', '/')
+    thumb_name = secure_filename(filename) + '.thumb.jpg'
+    thumb_full_path = os.path.join(thumb_dir, thumb_name)
+    temp_path = thumb_full_path + '.tmp'
+    try:
+        os.makedirs(thumb_dir, exist_ok=True)
+        with Image.open(raw_full_path) as im:
+            im = ImageOps.exif_transpose(im).convert('RGB')
+            im.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            im.save(temp_path, 'JPEG', quality=90, optimize=True)
+        os.replace(temp_path, thumb_full_path)
+        return f"uploads/{thumb_subfolder}/{thumb_name}"
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return None
+
+
+def _generate_flat_thumbnail(base_dir, flat_subfolder, filename):
+    """Same idea as _generate_thumbnail, for photo types stored in a
+    single flat folder (corridor photos) rather than the nested
+    project/division/line/tower/raw layout — thumbnails go in a sibling
+    '<folder>_thumb' folder instead of assuming a '/raw' suffix to swap,
+    so there's no risk of a thumbnail colliding with (and overwriting)
+    its own raw source file."""
+    from PIL import Image, ImageOps
+    raw_full_path = os.path.join(base_dir, UPLOAD_BASE, flat_subfolder, filename)
+    thumb_subfolder = f"{flat_subfolder}_thumb"
+    thumb_dir = os.path.join(base_dir, UPLOAD_BASE, thumb_subfolder)
+    thumb_name = secure_filename(filename) + '.thumb.jpg'
+    thumb_full_path = os.path.join(thumb_dir, thumb_name)
+    temp_path = thumb_full_path + '.tmp'
+    try:
+        os.makedirs(thumb_dir, exist_ok=True)
+        with Image.open(raw_full_path) as im:
+            im = ImageOps.exif_transpose(im).convert('RGB')
+            im.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            im.save(temp_path, 'JPEG', quality=90, optimize=True)
+        os.replace(temp_path, thumb_full_path)
+        return f"uploads/{thumb_subfolder}/{thumb_name}"
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return None
+
+
+def _slug(text, fallback='unknown'):
+    """Filesystem-safe folder name from a project/division/line/tower
+    name — lowercase, spaces to underscores, anything else stripped.
+    Never empty, so a folder path never ends up with a blank segment."""
+    text = (text or '').strip().lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text).strip('_')
+    return text or fallback
+
+
+def _save_tower_photo(file_storage, project, division, line, tower_label, allowed_exts, kind='raw'):
+    """Save an uploaded tower photo under the project's own folder tree:
+    uploads/tower_photos/<project>/<division>/<line>/<tower>/<kind>/<file>
+    kind is 'raw' for the photo as uploaded, or 'defects' for the
+    duplicate copy made when a defect gets marked on it (see
+    _duplicate_photo_for_defects) — same tree, sibling folders, so a
+    raw/ cleanup never touches anything under defects/.
+    Returns (path, thumbnail_path), each relative to /static — or the
+    same None/'' pair _save_upload uses for invalid type / no file.
+    thumbnail_path is only ever generated for kind='raw' (nothing else
+    needs its own thumbnail); it's None if generation failed or wasn't
+    attempted — callers should treat that as "no thumbnail" and move on,
+    not fail the whole upload over it."""
+    if not file_storage or not file_storage.filename:
+        return '', None
+    if not _ext_ok(file_storage.filename, allowed_exts):
+        return None, None
+    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
+    subfolder = os.path.join(
+        'tower_photos', _slug(project.name if project else None),
+        _slug(division.name if division else None), _slug(line.name if line else None),
+        _slug(tower_label), kind,
+    )
+    folder_fs = os.path.join(base_dir, UPLOAD_BASE, subfolder)
+    os.makedirs(folder_fs, exist_ok=True)
+    safe_name = secure_filename(file_storage.filename)
+    name_root, name_ext = os.path.splitext(safe_name)
+    final_name = safe_name
+    i = 1
+    while os.path.exists(os.path.join(folder_fs, final_name)):
+        final_name = f"{name_root}_{i}{name_ext}"
+        i += 1
+    file_storage.save(os.path.join(folder_fs, final_name))
+
+    thumb_path = None
+    if kind == 'raw':
+        thumb_path = _generate_thumbnail(base_dir, subfolder, final_name)
+        if thumb_path:
+            thumb_path = thumb_path.replace('\\', '/')
+
+    return f"uploads/{subfolder}/{final_name}", thumb_path
+
+
+def _duplicate_photo_for_defects(photo):
+    """Copies a TowerPhoto's raw file into that same tower's defects/
+    folder the first time a defect is marked on it — a real second copy
+    on disk, not just a second DB reference to the same file. This is
+    what lets raw/ get cleaned up later without losing the evidence a
+    marked defect depends on. Idempotent: does nothing if already copied
+    (photo.defect_copy_path already set) or if the raw file is missing.
+    Returns True if a copy exists after this call (whether just made or
+    already there), False if it couldn't be made."""
+    if photo.defect_copy_path:
+        return True
+    if not photo.image_path:
+        return False
+    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
+    src = os.path.join(base_dir, 'static', photo.image_path)
+    if not os.path.isfile(src):
+        return False
+    raw_dir, filename = os.path.split(photo.image_path)
+    # .../<tower>/raw  ->  .../<tower>/defects
+    defects_rel_dir = re.sub(r'/raw$', '/defects', raw_dir)
+    if defects_rel_dir == raw_dir:
+        # Old flat-path photos (uploaded before this folder structure
+        # existed) have no /raw suffix to swap — give them their own
+        # defects/ sibling next to wherever they actually live instead.
+        defects_rel_dir = raw_dir + '_defects'
+    dest_dir = os.path.join(base_dir, 'static', defects_rel_dir)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, filename)
+    if not os.path.isfile(dest):
+        shutil.copy2(src, dest)
+    photo.defect_copy_path = f"{defects_rel_dir}/{filename}"
+    return True
 
 
 def _haversine_km(lat1, lng1, lat2, lng2):
@@ -247,26 +504,24 @@ def api_list_projects():
     if guard:
         return guard
     module = request.args.get('module', '')
+    guard = _module_access_guard(module)
+    if guard:
+        return guard
     q = Project.query
     if module:
         q = q.filter_by(module=module)
     projects = q.order_by(Project.created_at.asc()).all()
 
-    # Project-wise access restriction (on top of module-level access,
-    # which already gated the page/nav getting here) — only actually
-    # narrows anything down for a Client User who's had specific projects
-    # assigned; everyone else sees the full list unfiltered.
-    if module:
-        allowed_ids = _visible_project_ids(module)
-        if allowed_ids is not None:
-            projects = [p for p in projects if p.id in allowed_ids]
+    allowed_ids = _visible_project_ids(module or None)
+    if allowed_ids is not None:
+        projects = [p for p in projects if p.id in allowed_ids]
 
-    return jsonify({'projects': [p.to_dict() for p in projects]})
+    return jsonify({'projects': [_visible_project_dict(p) for p in projects]})
 
 
 @projects_bp.route('/api/projects', methods=['POST'])
 def api_create_project():
-    guard = _login_guard()
+    guard = _admin_guard()
     if guard:
         return guard
 
@@ -331,15 +586,18 @@ def api_get_project(project_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _project_access_guard_by_id(project_id)
+    if guard:
+        return guard
     project = Project.query.get_or_404(project_id)
-    data = project.to_dict()
-    data['divisions'] = [d.to_dict() for d in project.divisions]
+    data = _visible_project_dict(project)
+    data['divisions'] = [_visible_division_dict(d) for d in project.divisions if can_access_division(d)]
     return jsonify(data)
 
 
 @projects_bp.route('/api/projects/<int:project_id>', methods=['DELETE'])
 def api_delete_project(project_id):
-    guard = _login_guard()
+    guard = _admin_guard()
     if guard:
         return guard
     project = Project.query.get_or_404(project_id)
@@ -350,10 +608,12 @@ def api_delete_project(project_id):
         return jsonify({'error': 'Incorrect delete password.'}), 403
 
     name, module = project.name, project.module
+    stored_paths = collect_project_files(project_id)
     db.session.delete(project)
     ActivityLog.log(action='delete', entity_type='Project', entity_name=name,
                      module=module, performed_by=session.get('user_name', ''))
     db.session.commit()
+    _cleanup_deleted_files(stored_paths, f'project {project_id}')
     return jsonify({'deleted': project_id})
 
 
@@ -368,6 +628,31 @@ def project_map(project_id):
     guard = _project_access_guard(project)
     if guard:
         return guard
+
+    # The map is a division workspace, never a project-wide browser.  Older
+    # links opened /projects/<id>/map without any scope, which made the UI
+    # switch back to the legacy combined divisions + lines view.  Require a
+    # division explicitly, or derive it from a trusted line deep-link (SME
+    # assignments and notifications use ?line=<id>).
+    selected_division = None
+    line_id = request.args.get('line', type=int)
+    division_id = request.args.get('division', type=int)
+    if line_id:
+        selected_line = Line.query.get(line_id)
+        if (not selected_line or not selected_line.division
+                or selected_line.division.project_id != project.id
+                or not can_access_line(selected_line)):
+            return redirect(url_for('projects_bp.project_divisions', project_id=project.id))
+        selected_division = selected_line.division
+    elif division_id:
+        candidate = Division.query.get(division_id)
+        if (not candidate or candidate.project_id != project.id
+                or not can_access_division(candidate)):
+            return redirect(url_for('projects_bp.project_divisions', project_id=project.id))
+        selected_division = candidate
+    else:
+        return redirect(url_for('projects_bp.project_divisions', project_id=project.id))
+
     from users import MODULE_ROUTES
     back_endpoint = MODULE_ROUTES.get(project.module, 'projects')
     is_admin = session.get('role') == 'Admin'
@@ -384,7 +669,64 @@ def project_map(project_id):
                      module=project.module, performed_by=session.get('user_name', ''), role=session.get('role', ''))
     db.session.commit()
     return render_template('project_map.html', project=project, user_name=session.get('user_name', ''),
-                            back_endpoint=back_endpoint, is_admin=is_admin, can_inspect=can_inspect)
+                            back_endpoint=back_endpoint, is_admin=is_admin, can_inspect=can_inspect,
+                            selected_division=selected_division)
+
+
+@projects_bp.route('/api/thermal/health')
+def api_thermal_health():
+    """Admin-only diagnostic for 'thermal isn't working': reports whether
+    the native DJI Thermal SDK loads on this server and the exact error if
+    not. The stored photo originals are never recompressed, so a thermal
+    failure is almost always either the SDK not loading here or a photo
+    that isn't a genuine radiometric R-JPEG."""
+    guard = _admin_guard()
+    if guard:
+        return guard
+    try:
+        from thermal_decode import sdk_health
+        return jsonify(sdk_health())
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'sdk_loaded': False, 'error': f'{type(e).__name__}: {e}'}), 500
+
+
+@projects_bp.route('/api/thermal/probe/<int:photo_id>')
+def api_thermal_probe(photo_id):
+    """Admin-only per-photo diagnostic for a thermal decode failure (e.g.
+    dirp_create_from_rjpeg code -7). Inspects the stored file and reports
+    whether it's a genuine radiometric R-JPEG or a plain/stripped JPEG."""
+    guard = _admin_guard()
+    if guard:
+        return guard
+    photo = TowerPhoto.query.get_or_404(photo_id)
+    try:
+        from thermal_decode import probe_rjpeg
+        path = os.path.join(current_app.static_folder, photo.image_path) if photo.image_path else ''
+        info = probe_rjpeg(path)
+        info['filename'] = os.path.basename(photo.image_path or '')
+        return jsonify(info)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+
+
+@projects_bp.route('/projects/<int:project_id>/divisions')
+def project_divisions(project_id):
+    """Division-cards page that sits between the project card and the map:
+    project card -> divisions -> (pick a division) -> map, where lines are
+    added. Divisions are created here rather than inside the map."""
+    guard = _login_guard()
+    if guard:
+        return guard
+    project = Project.query.get_or_404(project_id)
+    guard = _project_access_guard(project)
+    if guard:
+        return guard
+    from users import MODULE_ROUTES
+    back_endpoint = MODULE_ROUTES.get(project.module, 'projects')
+    is_admin = session.get('role') == 'Admin'
+    return render_template('project_divisions.html', project=project,
+                            user_name=session.get('user_name', ''),
+                            back_endpoint=back_endpoint, is_admin=is_admin)
 
 
 def _build_project_defect_summary(project):
@@ -394,8 +736,17 @@ def _build_project_defect_summary(project):
     presentation details (the CSS conic-gradient string, bar-chart
     percentages) are layered on top of this in project_overview() rather
     than baked in here, since the PDF report has no use for them."""
-    divisions = project.divisions
-    lines = [l for d in divisions for l in d.lines]
+    all_divisions = project.divisions
+    allowed_line_ids = visible_line_ids()
+    lines = [
+        line for division in all_divisions for line in division.lines
+        if allowed_line_ids is None or line.id in allowed_line_ids
+    ]
+    visible_line_id_set = {line.id for line in lines}
+    if session.get('role') in ('Pilot', 'SME'):
+        divisions = [d for d in all_divisions if any(line.id in visible_line_id_set for line in d.lines)]
+    else:
+        divisions = all_divisions
     line_ids = [l.id for l in lines]
 
     # line_id -> (line, division), so each defect row can show which line
@@ -403,7 +754,18 @@ def _build_project_defect_summary(project):
     line_lookup = {}
     for d in divisions:
         for l in d.lines:
-            line_lookup[l.id] = (l, d)
+            if l.id in visible_line_id_set:
+                line_lookup[l.id] = (l, d)
+
+    released_tower_keys = None
+    if session.get('role') == 'Client User' and line_ids:
+        released_tower_keys = {
+            (status.line_id, status.tower_label)
+            for status in TowerInspectionStatus.query.filter(
+                TowerInspectionStatus.line_id.in_(line_ids),
+                TowerInspectionStatus.inspection_done.is_(True),
+            ).all()
+        }
 
     defects = []
     if line_ids:
@@ -411,12 +773,28 @@ def _build_project_defect_summary(project):
                    .join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
                    .filter(TowerPhoto.line_id.in_(line_ids))
                    .order_by(TowerDefect.created_at.desc()).all())
+        if released_tower_keys is not None:
+            defects = [d for d in defects if (d.photo.line_id, d.photo.tower_label) in released_tower_keys]
+
+    # Real inspection coverage — independent of whether a photo happens to
+    # have a defect on it. A tower can be fully photographed and inspected
+    # with nothing wrong found; the old computation below only counted a
+    # tower as "photographed" if it also had a defect, silently missing
+    # every clean tower in the number Admin/Client actually see.
+    all_photos = TowerPhoto.query.filter(TowerPhoto.line_id.in_(line_ids)).all() if line_ids else []
+    if released_tower_keys is not None:
+        all_photos = [p for p in all_photos if (p.line_id, p.tower_label) in released_tower_keys]
+    photos_uploaded = len(all_photos)
+    photographed_tower_keys = {(p.line_id, p.tower_label) for p in all_photos}
+    inspected_statuses = (TowerInspectionStatus.query
+                          .filter(TowerInspectionStatus.line_id.in_(line_ids), TowerInspectionStatus.inspection_done.is_(True))
+                          .all()) if line_ids else []
+    towers_inspected = len(inspected_statuses)
 
     severity_counts = {'Critical': 0, 'Major': 0, 'Minor': 0}
     division_defect_counts = {}
     defect_type_counts = {}
     defect_rows = []
-    photographed_towers = set()
     for defect in defects:
         photo = defect.photo
         line, division = line_lookup.get(photo.line_id, (None, None))
@@ -426,7 +804,6 @@ def _build_project_defect_summary(project):
         division_defect_counts[div_name] = division_defect_counts.get(div_name, 0) + 1
         dtype = defect.defect_type or 'Unspecified'
         defect_type_counts[dtype] = defect_type_counts.get(dtype, 0) + 1
-        photographed_towers.add((photo.line_id, photo.tower_label))
         try:
             shape_coords = json.loads(defect.shape_coords) if defect.shape_coords else []
         except (TypeError, ValueError):
@@ -438,6 +815,10 @@ def _build_project_defect_summary(project):
             'severity': defect.severity,
             'location': defect.location,
             'status': defect.status,
+            'resolution_status': defect.resolution_status or 'Open',
+            'resolution_comment': defect.resolution_comment or '',
+            'resolved_by': defect.resolved_by,
+            'resolved_at': defect.resolved_at,
             'comments': defect.comments,
             'tower_label': photo.tower_label,
             'line_id': photo.line_id,
@@ -447,6 +828,7 @@ def _build_project_defect_summary(project):
             'created_by': defect.created_by,
             'image_path': photo.image_path or '',
             'image_url': f'/static/{photo.image_path}' if photo.image_path else '',
+            'thumbnail_url': f'/static/{photo.thumbnail_path or photo.display_image_path()}' if (photo.thumbnail_path or photo.display_image_path()) else '',
             'shape_type': defect.shape_type,
             'shape_coords': shape_coords,
         })
@@ -454,16 +836,25 @@ def _build_project_defect_summary(project):
     total_defects = len(defect_rows)
 
     # Per-division breakdown — lines, towers, and defects for each division
-    # on its own, not just the project-wide totals.
+    # on its own, not just the project-wide totals. Also the same real
+    # inspection-coverage numbers (KML towers / photos / photographed /
+    # inspected), scoped to each division's own lines.
     division_stats = []
     for d in divisions:
-        d_lines = d.lines
+        d_lines = [line for line in d.lines if line.id in visible_line_id_set]
+        d_line_ids = [l.id for l in d_lines]
         d_towers = sum(l.tower_count or 0 for l in d_lines)
+        d_photos = [p for p in all_photos if p.line_id in d_line_ids]
+        d_photographed = len({(p.line_id, p.tower_label) for p in d_photos})
+        d_inspected = sum(1 for s in inspected_statuses if s.line_id in d_line_ids)
         division_stats.append({
             'name': d.name,
             'line_count': len(d_lines),
             'tower_count': d_towers,
             'defect_count': division_defect_counts.get(d.name, 0),
+            'photos_uploaded': len(d_photos),
+            'towers_photographed': d_photographed,
+            'towers_inspected': d_inspected,
         })
 
     # Defects grouped by tower (division -> line -> tower) — kept for
@@ -502,8 +893,11 @@ def _build_project_defect_summary(project):
     return {
         'division_count': len(divisions),
         'line_count': len(lines),
+        'line_ids': line_ids,
         'tower_count': sum(l.tower_count or 0 for l in lines),
-        'towers_photographed': len(photographed_towers),
+        'towers_photographed': len(photographed_tower_keys),
+        'photos_uploaded': photos_uploaded,
+        'towers_inspected': towers_inspected,
         'total_defects': total_defects,
         'severity_counts': severity_counts,
         'division_defect_counts': division_defect_counts,
@@ -512,6 +906,111 @@ def _build_project_defect_summary(project):
         'defect_rows': defect_rows,
         'tower_groups': tower_groups,
         'type_groups': type_groups,
+    }
+
+
+def _build_project_chart_data(s):
+    """Severity pie + division/type bar chart data, computed from a
+    _build_project_defect_summary() result — shared by the Overview page
+    and the client dashboard so both always show identical charts for
+    the same project, never two slightly-different computations."""
+    total_defects = s['total_defects']
+    severity_counts = s['severity_counts']
+    division_defect_counts = s['division_defect_counts']
+    defect_type_counts = s['defect_type_counts']
+
+    def _deg(n):
+        return round((n / total_defects * 360), 2) if total_defects else 0
+    crit_deg = _deg(severity_counts['Critical'])
+    major_deg = _deg(severity_counts['Major'])
+    if total_defects:
+        severity_pie_gradient = (
+            f"conic-gradient(var(--danger) 0deg {crit_deg}deg, "
+            f"#e0a53a {crit_deg}deg {crit_deg + major_deg}deg, "
+            f"var(--success) {crit_deg + major_deg}deg 360deg)"
+        )
+    else:
+        severity_pie_gradient = 'conic-gradient(var(--border) 0deg 360deg)'
+
+    max_div_count = max(division_defect_counts.values()) if division_defect_counts else 1
+    division_bars = [
+        {'name': name, 'count': count, 'pct': round(count / max_div_count * 100)}
+        for name, count in sorted(division_defect_counts.items(), key=lambda kv: -kv[1])
+    ]
+
+    max_type_count = max(defect_type_counts.values()) if defect_type_counts else 1
+    defect_type_bars = [
+        {'name': name, 'count': count, 'pct': round(count / max_type_count * 100)}
+        for name, count in sorted(defect_type_counts.items(), key=lambda kv: kv[0].lower())
+    ]
+
+    return {
+        'severity_pie_gradient': severity_pie_gradient,
+        'division_bars': division_bars,
+        'defect_type_bars': defect_type_bars,
+    }
+
+
+def _build_project_activity_data(s, project_id, max_items=8):
+    """Resolution progress + a 'Needs Attention' list (open Critical
+    defects, oldest first — the ones that have been sitting the longest)
+    + an aging breakdown for every open defect (not just Critical ones)
+    + divisions ranked by defect density (defects per tower, not just
+    raw count — a division with 40 towers and 5 defects is doing better
+    than one with 5 towers and 5 defects, and a raw count alone hides
+    that). All computed straight from defect_rows so it can never drift
+    from what the charts above show."""
+    from datetime import datetime as _dt
+
+    rows = s['defect_rows']
+    open_count = sum(1 for r in rows if (r.get('resolution_status') or 'Open') == 'Open')
+    closed_count = sum(1 for r in rows if r.get('resolution_status') == 'Closed')
+    total = open_count + closed_count
+    resolution_pct = round(closed_count / total * 100) if total else 0
+
+    # Not capped at max_items — the card scrolls internally now, so a
+    # project with 40 open Critical defects shows all 40, oldest first,
+    # rather than silently hiding anything past the first few.
+    needs_attention = sorted(
+        (r for r in rows if r['severity'] == 'Critical' and (r.get('resolution_status') or 'Open') == 'Open'),
+        key=lambda r: r['created_at'] or _dt.min,
+    )
+    for r in needs_attention:
+        r['type_url'] = f"/projects/{project_id}/defects/{r['defect_type'] or 'Unspecified'}"
+
+    # How long has each still-open defect been sitting there? A defect
+    # open 45 days is a very different story from one open 2 days, even
+    # at the same severity — buckets make that visible at a glance.
+    now = _dt.utcnow()
+    aging = {'0-7': 0, '8-30': 0, '30+': 0}
+    for r in rows:
+        if (r.get('resolution_status') or 'Open') != 'Open' or not r['created_at']:
+            continue
+        days = (now - r['created_at']).days
+        if days <= 7:
+            aging['0-7'] += 1
+        elif days <= 30:
+            aging['8-30'] += 1
+        else:
+            aging['30+'] += 1
+
+    # Density ranking — defects per tower actually covered so far, not
+    # per tower planned, since a division still being photographed
+    # shouldn't look artificially "clean" next to one that's finished.
+    density_ranking = []
+    for ds in s['division_stats']:
+        covered = ds['towers_photographed']
+        density = round(ds['defect_count'] / covered, 2) if covered else 0
+        density_ranking.append({'name': ds['name'], 'defect_count': ds['defect_count'], 'towers_photographed': covered, 'density': density})
+    density_ranking.sort(key=lambda d: -d['density'])
+
+    return {
+        'open_count': open_count,
+        'closed_count': closed_count,
+        'resolution_pct': resolution_pct,
+        'needs_attention': needs_attention,
+        'aging': aging,
+        'density_ranking': density_ranking,
     }
 
 
@@ -531,51 +1030,18 @@ def project_overview(project_id):
     s = _build_project_defect_summary(project)
     total_defects = s['total_defects']
     severity_counts = s['severity_counts']
-    division_defect_counts = s['division_defect_counts']
-    defect_type_counts = s['defect_type_counts']
 
-    # Severity pie — same CSS conic-gradient technique as the chimney
-    # module's overview page. Web-only presentation, not part of the
-    # shared summary above.
-    def _deg(n):
-        return round((n / total_defects * 360), 2) if total_defects else 0
-    crit_deg = _deg(severity_counts['Critical'])
-    major_deg = _deg(severity_counts['Major'])
-    if total_defects:
-        severity_pie_gradient = (
-            f"conic-gradient(var(--danger) 0deg {crit_deg}deg, "
-            f"#e0a53a {crit_deg}deg {crit_deg + major_deg}deg, "
-            f"var(--success) {crit_deg + major_deg}deg 360deg)"
-        )
-    else:
-        severity_pie_gradient = 'conic-gradient(var(--border) 0deg 360deg)'
-
-    # Bar chart — defects per division, tallest first.
-    max_div_count = max(division_defect_counts.values()) if division_defect_counts else 1
-    division_bars = [
-        {'name': name, 'count': count, 'pct': round(count / max_div_count * 100)}
-        for name, count in sorted(division_defect_counts.items(), key=lambda kv: -kv[1])
-    ]
-
-    # Bar chart — one bar per defect TYPE that's actually been marked
-    # (Anti Climbing Device, Arcing Horn, etc.) — a type with zero
-    # defects marked never shows up here at all, only types that have
-    # at least one. A-Z, not by count — this is a menu to click into,
-    # not a ranking.
-    max_type_count = max(defect_type_counts.values()) if defect_type_counts else 1
-    defect_type_bars = [
-        {'name': name, 'count': count, 'pct': round(count / max_type_count * 100)}
-        for name, count in sorted(defect_type_counts.items(), key=lambda kv: kv[0].lower())
-    ]
+    chart_data = _build_project_chart_data(s)
 
     return render_template('project_overview.html',
         project=project, user_name=session.get('user_name', ''), is_admin=is_admin,
         back_endpoint=back_endpoint,
         division_count=s['division_count'], line_count=s['line_count'], tower_count=s['tower_count'],
-        towers_photographed=s['towers_photographed'],
+        towers_photographed=s['towers_photographed'], photos_uploaded=s['photos_uploaded'],
+        towers_inspected=s['towers_inspected'],
         total_defects=total_defects, severity_counts=severity_counts,
-        severity_pie_gradient=severity_pie_gradient, division_bars=division_bars,
-        defect_type_bars=defect_type_bars,
+        severity_pie_gradient=chart_data['severity_pie_gradient'], division_bars=chart_data['division_bars'],
+        defect_type_bars=chart_data['defect_type_bars'],
         division_stats=s['division_stats'], tower_groups=s['tower_groups'],
         type_groups=s['type_groups'],
         defect_rows=s['defect_rows'],
@@ -634,8 +1100,11 @@ def project_defects_by_tower(project_id):
         line_tower_counts[row['line_id']][row['tower_label']] += 1
 
     lines_data = []
+    summary_line_ids = set(s['line_ids'])
     for division in project.divisions:
         for line in division.lines:
+            if line.id not in summary_line_ids:
+                continue
             towers = line_tower_counts.get(line.id, {})
             lines_data.append({
                 'id': line.id,
@@ -682,6 +1151,47 @@ def project_defect_report(project_id):
     return send_file(pdf_buf, as_attachment=False, download_name=download_name, mimetype='application/pdf')
 
 
+@projects_bp.route('/projects/<int:project_id>/defects/export.csv')
+def project_defects_export_csv(project_id):
+    """Every defect on the project as a spreadsheet — for whoever wants
+    to filter/pivot/share it outside the app rather than read it on
+    screen. Same underlying data as everywhere else (defect_rows), so
+    the export always matches what the dashboard and Overview show."""
+    guard = _login_guard()
+    if guard:
+        return guard
+    project = Project.query.get_or_404(project_id)
+    guard = _project_access_guard(project)
+    if guard:
+        return guard
+
+    s = _build_project_defect_summary(project)
+
+    import csv
+    import io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['Division', 'Line', 'Tower', 'Position', 'Component', 'Defect Type', 'Severity',
+                      'Status', 'Resolution', 'Resolved By', 'Resolution Comment', 'Marked By', 'Marked At'])
+    for r in s['defect_rows']:
+        writer.writerow([
+            r['division_name'], r['line_name'], r['tower_label'], r['location'] or '',
+            r['component_name'] or '', r['defect_type'] or '', r['severity'],
+            r['status'] or '', r.get('resolution_status') or 'Open', r.get('resolved_by') or '',
+            r.get('resolution_comment') or '', r['created_by'] or '',
+            r['created_at'].strftime('%Y-%m-%d %H:%M') if r['created_at'] else '',
+        ])
+
+    from flask import Response
+    safe_name = ''.join(c for c in project.name if c.isalnum() or c in ' _-').strip().replace(' ', '_')
+    filename = f'{safe_name or "project"}_defects.csv'
+    return Response(
+        buf.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
 @projects_bp.route('/projects/<int:project_id>/info')
 def project_info(project_id):
     guard = _login_guard()
@@ -701,27 +1211,20 @@ def api_list_divisions(project_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _project_access_guard_by_id(project_id)
+    if guard:
+        return guard
     Project.query.get_or_404(project_id)
     divisions = Division.query.filter_by(project_id=project_id).order_by(Division.created_at.asc()).all()
-    if session.get('role') == 'SME':
-        # SME only ever sees divisions that actually contain a line
-        # they've been assigned — not the whole project structure the
-        # way Admin (or even Client, who's assigned at the project
-        # level) sees it.
-        assigned_division_ids = {
-            line_id_division_id[0] for line_id_division_id in
-            db.session.query(Line.division_id)
-            .join(SmeAssignment, SmeAssignment.line_id == Line.id)
-            .filter(SmeAssignment.sme_user_id == session.get('user_id'))
-            .distinct().all()
-        }
-        divisions = [d for d in divisions if d.id in assigned_division_ids]
-    return jsonify({'divisions': [d.to_dict() for d in divisions]})
+    if session.get('role') in ('Pilot', 'SME'):
+        assigned_line_ids = visible_line_ids() or set()
+        divisions = [d for d in divisions if any(line.id in assigned_line_ids for line in d.lines)]
+    return jsonify({'divisions': [_visible_division_dict(d) for d in divisions]})
 
 
 @projects_bp.route('/api/projects/<int:project_id>/divisions', methods=['POST'])
 def api_create_division(project_id):
-    guard = _login_guard()
+    guard = _admin_guard()
     if guard:
         return guard
     Project.query.get_or_404(project_id)
@@ -760,12 +1263,29 @@ def api_create_division(project_id):
 
 @projects_bp.route('/api/divisions/<int:division_id>', methods=['DELETE'])
 def api_delete_division(division_id):
-    guard = _login_guard()
+    """Cascades to every Line under it, and everything under those (photos,
+    defects, thermal points) — just as destructive as deleting a whole
+    project, so it's gated the same way: Admin only, delete password
+    required. Was previously just _login_guard(), meaning any logged-in
+    session — including a view-only Client User — could delete a whole
+    division with no confirmation at all."""
+    guard = _admin_guard()
     if guard:
         return guard
     division = Division.query.get_or_404(division_id)
+
+    data = request.get_json(force=True, silent=True) or {}
+    password = (data.get('password') or request.args.get('password') or '').strip()
+    if not app_settings.verify_delete_password(password):
+        return jsonify({'error': 'Incorrect delete password.'}), 403
+
+    name = division.name
+    stored_paths = collect_division_files(division_id)
     db.session.delete(division)
+    ActivityLog.log(action='delete', entity_type='Division', entity_name=name,
+                     performed_by=session.get('user_name', ''), role=session.get('role', ''))
     db.session.commit()
+    _cleanup_deleted_files(stored_paths, f'division {division_id}')
     return jsonify({'deleted': division_id})
 
 
@@ -776,21 +1296,20 @@ def api_list_lines(division_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _division_access_guard(division_id)
+    if guard:
+        return guard
     Division.query.get_or_404(division_id)
     lines = Line.query.filter_by(division_id=division_id).order_by(Line.created_at.asc()).all()
-    if session.get('role') == 'SME':
-        # Only lines this SME has actually been assigned — same principle
-        # as the division filter above.
-        assigned_line_ids = {row[0] for row in
-                              db.session.query(SmeAssignment.line_id)
-                              .filter(SmeAssignment.sme_user_id == session.get('user_id')).all()}
+    if session.get('role') in ('Pilot', 'SME'):
+        assigned_line_ids = visible_line_ids() or set()
         lines = [l for l in lines if l.id in assigned_line_ids]
     return jsonify({'lines': [l.to_dict() for l in lines]})
 
 
 @projects_bp.route('/api/divisions/<int:division_id>/lines', methods=['POST'])
 def api_create_line(division_id):
-    guard = _login_guard()
+    guard = _admin_guard()
     if guard:
         return guard
     Division.query.get_or_404(division_id)
@@ -858,6 +1377,9 @@ def api_get_line(line_id):
     SME dashboard's "Start Work" card), without the caller needing to
     already know which division it's under."""
     guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
     if guard:
         return guard
     line = Line.query.get_or_404(line_id)
@@ -970,6 +1492,57 @@ def _kml_pick_tower_label(props):
     if props.get('name'):
         return str(props['name'])
     return 'Point'
+
+
+def _kml_tower_coordinates(line, tower_label):
+    """Return trusted ``(lat, lng)`` for a tower from the line's KML/KMZ.
+
+    Pilot capture requests must never supply the reference tower position
+    themselves; otherwise both sides of the distance check are controlled by
+    the browser. ``None`` means the line file or label could not be verified.
+    """
+    if not line or not line.kml_path or not tower_label:
+        return None
+    full_path = os.path.join(current_app.root_path, 'static', line.kml_path)
+    if not os.path.isfile(full_path):
+        return None
+
+    import xml.etree.ElementTree as ET
+    import zipfile
+    try:
+        if full_path.lower().endswith('.kmz'):
+            with zipfile.ZipFile(full_path) as archive:
+                kml_name = next((n for n in archive.namelist() if n.lower().endswith('.kml')), None)
+                if not kml_name:
+                    return None
+                root = ET.fromstring(archive.read(kml_name))
+        else:
+            root = ET.parse(full_path).getroot()
+    except (OSError, ET.ParseError, zipfile.BadZipFile):
+        return None
+
+    wanted = str(tower_label).strip().casefold()
+    for placemark in root.iter():
+        if _kml_local_tag(placemark) != 'Placemark':
+            continue
+        label = _kml_pick_tower_label(_kml_placemark_props(placemark)).strip().casefold()
+        if label != wanted:
+            continue
+        point = next((child for child in placemark.iter() if _kml_local_tag(child) == 'Point'), None)
+        if point is None:
+            return None
+        coords = next((child for child in point.iter() if _kml_local_tag(child) == 'coordinates'), None)
+        if coords is None or not coords.text:
+            return None
+        try:
+            first = coords.text.strip().split()[0]
+            lng, lat = (float(v) for v in first.split(',')[:2])
+        except (IndexError, TypeError, ValueError):
+            return None
+        if -90 <= lat <= 90 and -180 <= lng <= 180:
+            return lat, lng
+        return None
+    return None
 
 
 def _kml_remove_placemark(root, placemark):
@@ -1168,12 +1741,26 @@ def api_edit_kml(line_id):
 
 @projects_bp.route('/api/lines/<int:line_id>', methods=['DELETE'])
 def api_delete_line(line_id):
-    guard = _login_guard()
+    """Same fix as division delete above — this cascades to every photo,
+    defect, and thermal point on the line, and was previously reachable
+    by any logged-in session with no password and no role check."""
+    guard = _admin_guard()
     if guard:
         return guard
     line = Line.query.get_or_404(line_id)
+
+    data = request.get_json(force=True, silent=True) or {}
+    password = (data.get('password') or request.args.get('password') or '').strip()
+    if not app_settings.verify_delete_password(password):
+        return jsonify({'error': 'Incorrect delete password.'}), 403
+
+    name = line.name
+    stored_paths = collect_line_files(line_id)
     db.session.delete(line)
+    ActivityLog.log(action='delete', entity_type='Line', entity_name=name,
+                     performed_by=session.get('user_name', ''), role=session.get('role', ''))
     db.session.commit()
+    _cleanup_deleted_files(stored_paths, f'line {line_id}')
     return jsonify({'deleted': line_id})
 
 
@@ -1186,6 +1773,9 @@ def api_delete_line(line_id):
 @projects_bp.route('/api/lines/<int:line_id>/tower-photos', methods=['GET'])
 def api_list_tower_photos(line_id):
     guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
     if guard:
         return guard
     Line.query.get_or_404(line_id)
@@ -1282,7 +1872,7 @@ def api_upload_tower_photo(line_id):
     else:
         gps = None
 
-    saved = _save_upload(image_file, 'tower_photos', IMAGE_EXTS)
+    saved, thumb = _save_tower_photo(image_file, project, line.division, line, tower_label, IMAGE_EXTS)
     if saved is None:
         return jsonify({'error': 'Image must be a .jpg, .png, or .webp file.'}), 400
     if saved == '':
@@ -1292,6 +1882,7 @@ def api_upload_tower_photo(line_id):
         line_id=line_id,
         tower_label=tower_label,
         image_path=saved,
+        thumbnail_path=thumb,
         uploaded_by=session.get('user_name', ''),
         gps_lat=gps[0] if gps else None,
         gps_lng=gps[1] if gps else None,
@@ -1300,6 +1891,98 @@ def api_upload_tower_photo(line_id):
     db.session.add(photo)
     db.session.commit()
     return jsonify(photo.to_dict()), 201
+
+
+@projects_bp.route('/api/lines/<int:line_id>/upload-batches', methods=['GET', 'POST'])
+def api_line_upload_batches(line_id):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    Line.query.get_or_404(line_id)
+    if request.method == 'GET':
+        batches = (UploadBatch.query.filter_by(line_id=line_id)
+                   .order_by(UploadBatch.id.desc()).limit(20).all())
+        tower_counts = dict(db.session.query(TowerPhoto.tower_label, db.func.count(TowerPhoto.id))
+                            .filter(TowerPhoto.line_id == line_id)
+                            .group_by(TowerPhoto.tower_label).all())
+        return jsonify({'batches': [row.to_dict() for row in batches],
+                        'tower_counts': [{'tower_label': key, 'images': value}
+                                         for key, value in sorted(tower_counts.items())]})
+    data = request.get_json(silent=True) or {}
+    batch = UploadBatch(
+        line_id=line_id, uploaded_by_user_id=session.get('user_id'),
+        uploaded_by_name=session.get('user_name', ''),
+        folder_name=(data.get('folder_name') or '')[:255],
+        total_files=max(0, int(data.get('total_files') or 0)), status='Preparing')
+    db.session.add(batch)
+    db.session.commit()
+    return jsonify(batch.to_dict()), 201
+
+
+@projects_bp.route('/api/upload-batches/<int:batch_id>', methods=['GET', 'PATCH'])
+def api_upload_batch(batch_id):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    batch = UploadBatch.query.get_or_404(batch_id)
+    if request.method == 'GET':
+        return jsonify(batch.to_dict(include_items=True))
+    data = request.get_json(silent=True) or {}
+    previous_status = batch.status
+    allowed_statuses = {'Preparing', 'Uploading', 'Completed', 'Completed with errors', 'Cancelled'}
+    if data.get('status') in allowed_statuses:
+        batch.status = data['status']
+        if batch.status in {'Completed', 'Completed with errors', 'Cancelled'}:
+            batch.finished_at = datetime.utcnow()
+    items = data.get('items') or []
+    for item in items:
+        status = item.get('status')
+        if status not in {'Completed', 'Duplicate', 'Failed', 'No GPS', 'Unmatched', 'Cancelled'}:
+            continue
+        db.session.add(UploadBatchItem(
+            batch_id=batch.id, filename=(item.get('filename') or 'unknown')[:500],
+            tower_label=(item.get('tower_label') or '')[:150], status=status,
+            error_message=(item.get('error') or '')[:2000],
+            file_size=max(0, int(item.get('file_size') or 0)),
+            attempts=max(0, int(item.get('attempts') or 0))))
+    db.session.flush()
+    counts = dict(db.session.query(UploadBatchItem.status, db.func.count(UploadBatchItem.id))
+                  .filter(UploadBatchItem.batch_id == batch.id)
+                  .group_by(UploadBatchItem.status).all())
+    batch.completed_files = counts.get('Completed', 0)
+    batch.duplicate_files = counts.get('Duplicate', 0)
+    batch.failed_files = counts.get('Failed', 0)
+    batch.no_gps_files = counts.get('No GPS', 0)
+    batch.unmatched_files = counts.get('Unmatched', 0)
+    batch.cancelled_files = counts.get('Cancelled', 0)
+    batch.matched_files = batch.completed_files + batch.duplicate_files + batch.failed_files
+    if previous_status not in {'Completed', 'Completed with errors', 'Cancelled'} and batch.status in {'Completed', 'Completed with errors'}:
+        assignment = SmeAssignment.query.filter_by(line_id=batch.line_id).first()
+        if assignment:
+            line = batch.line
+            project = line.division.project if line and line.division else None
+            notify_user(assignment.sme_user_id, f'Images ready for review — {line.name}',
+                        f'{batch.completed_files} uploaded, {batch.failed_files + batch.no_gps_files + batch.unmatched_files} need attention.',
+                        'upload', f'/projects/{project.id}/map?line={line.id}' if project else '')
+    db.session.commit()
+    return jsonify(batch.to_dict(include_items=True))
+
+
+@projects_bp.route('/api/upload-batches/<int:batch_id>/errors.csv')
+def api_upload_batch_errors(batch_id):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    batch = UploadBatch.query.get_or_404(batch_id)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['File', 'Tower', 'Status', 'Reason', 'Attempts', 'Size bytes'])
+    for item in sorted(batch.items, key=lambda row: row.id):
+        if item.status not in {'Completed', 'Duplicate'}:
+            writer.writerow([item.filename, item.tower_label, item.status,
+                             item.error_message, item.attempts, item.file_size])
+    return Response(output.getvalue(), mimetype='text/csv', headers={
+        'Content-Disposition': f'attachment; filename=upload_batch_{batch.id}_errors.csv'})
 
 
 @projects_bp.route('/api/lines/<int:line_id>/tower-defects-flat', methods=['GET'])
@@ -1312,10 +1995,16 @@ def api_tower_defects_flat(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     tower_label = (request.args.get('tower') or '').strip()
     if not tower_label:
         return jsonify({'error': 'tower is required.'}), 400
+    guard = _client_tower_release_guard(line_id, tower_label)
+    if guard:
+        return guard
     defects = (TowerDefect.query
                .join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
                .filter(TowerPhoto.line_id == line_id, TowerPhoto.tower_label == tower_label)
@@ -1324,6 +2013,7 @@ def api_tower_defects_flat(line_id):
     for d in defects:
         entry = d.to_dict()
         entry['image_url'] = f'/static/{d.photo.image_path}' if d.photo.image_path else ''
+        entry['thumbnail_url'] = f'/static/{d.photo.thumbnail_path}' if d.photo.thumbnail_path else entry['image_url']
         out.append(entry)
     return jsonify({'defects': out})
 
@@ -1339,10 +2029,16 @@ def api_tower_thermal_points_flat(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     tower_label = (request.args.get('tower') or '').strip()
     if not tower_label:
         return jsonify({'error': 'tower is required.'}), 400
+    guard = _client_tower_release_guard(line_id, tower_label)
+    if guard:
+        return guard
     points = (ThermalPoint.query
               .join(TowerPhoto, ThermalPoint.tower_photo_id == TowerPhoto.id)
               .filter(TowerPhoto.line_id == line_id, TowerPhoto.tower_label == tower_label)
@@ -1364,15 +2060,29 @@ def api_division_photo_coverage(division_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _division_access_guard(division_id)
+    if guard:
+        return guard
     division = Division.query.get_or_404(division_id)
-    lines = division.lines
+    lines = [line for line in division.lines if can_access_line(line)]
     line_ids = [l.id for l in lines]
 
     photographed_counts = {}
     if line_ids:
         rows = (db.session.query(TowerPhoto.line_id, TowerPhoto.tower_label)
                 .filter(TowerPhoto.line_id.in_(line_ids)).distinct().all())
-        for line_id, _label in rows:
+        released_keys = None
+        if session.get('role') == 'Client User':
+            released_keys = {
+                (s.line_id, s.tower_label)
+                for s in TowerInspectionStatus.query.filter(
+                    TowerInspectionStatus.line_id.in_(line_ids),
+                    TowerInspectionStatus.inspection_done.is_(True),
+                ).all()
+            }
+        for line_id, label in rows:
+            if released_keys is not None and (line_id, label) not in released_keys:
+                continue
             photographed_counts[line_id] = photographed_counts.get(line_id, 0) + 1
 
     return jsonify({
@@ -1397,6 +2107,9 @@ def api_tower_photo_labels(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     q = db.session.query(TowerPhoto.tower_label).filter_by(line_id=line_id)
     if session.get('role') == 'Client User':
@@ -1416,6 +2129,9 @@ def api_tower_photo_points(line_id):
     stored GPS (uploaded before this was tracked, or where EXIF/capture
     GPS wasn't available) are skipped — there's nowhere to put their dot."""
     guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
     if guard:
         return guard
     Line.query.get_or_404(line_id)
@@ -1440,6 +2156,9 @@ def api_tower_summary(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
 
     defect_counts = dict(
@@ -1453,6 +2172,8 @@ def api_tower_summary(line_id):
     inspection_done = {r.tower_label: bool(r.inspection_done) for r in inspection_rows}
 
     labels = set(defect_counts.keys()) | set(inspection_done.keys())
+    if session.get('role') == 'Client User':
+        labels = {label for label in labels if inspection_done.get(label, False)}
     return jsonify({'towers': {
         label: {'defect_count': defect_counts.get(label, 0), 'inspection_done': inspection_done.get(label, False)}
         for label in labels
@@ -1468,9 +2189,15 @@ def api_get_tower_zones(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     rows = TowerInspectionStatus.query.filter_by(line_id=line_id).filter(TowerInspectionStatus.zone != '').all()
     submitted_rows = TowerInspectionStatus.query.filter_by(line_id=line_id, pilot_submitted=True).all()
+    if session.get('role') == 'Client User':
+        rows = [r for r in rows if r.inspection_done]
+        submitted_rows = [r for r in submitted_rows if r.inspection_done]
     return jsonify({
         'zones': {r.tower_label: r.zone for r in rows},
         'submitted_labels': [r.tower_label for r in submitted_rows],
@@ -1482,9 +2209,26 @@ def api_get_inspection_status(line_id, tower_label):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     tower_label = tower_label.strip()
     status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    if session.get('role') == 'Client User' and (not status or not status.inspection_done):
+        return jsonify({
+            'line_id': line_id,
+            'tower_label': tower_label,
+            'inspection_done': False,
+            'marked_by': '',
+            'marked_at': '',
+            'zone': '',
+            'zone_set_by': '',
+            'zone_set_at': '',
+            'pilot_submitted': False,
+            'pilot_submitted_by': '',
+            'pilot_submitted_at': '',
+        })
     if status:
         return jsonify(status.to_dict())
     return jsonify({'line_id': line_id, 'tower_label': tower_label, 'inspection_done': False, 'marked_by': '', 'marked_at': '',
@@ -1500,14 +2244,26 @@ def api_set_inspection_status(line_id, tower_label):
     tower_label = tower_label.strip()
     data = request.get_json(force=True, silent=True) or {}
     done = bool(data.get('inspection_done'))
-
     status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    was_done = bool(status and status.inspection_done)
+
     if not status:
         status = TowerInspectionStatus(line_id=line_id, tower_label=tower_label)
         db.session.add(status)
     status.inspection_done = done
     status.marked_by = session.get('user_name', '') if done else ''
     status.marked_at = datetime.utcnow() if done else None
+    if done and not was_done:
+        line = Line.query.get(line_id)
+        project = line.division.project if line and line.division else None
+        notify_users([user.id for user in (project.allowed_users if project else [])],
+                     f'Tower {tower_label} is ready',
+                     f'{line.name if line else "Assigned line"} inspection is now visible to you.',
+                     'inspection', f'/projects/{project.id}/map?line={line_id}' if project else '')
+        notify_users([uid for uid in admin_user_ids() if uid != session.get('user_id')],
+                     f'Inspection completed — Tower {tower_label}',
+                     f'{session.get("user_name", "SME")} completed the inspection.',
+                     'inspection', f'/projects/{project.id}/map?line={line_id}' if project else '')
     db.session.commit()
     return jsonify(status.to_dict())
 
@@ -1515,12 +2271,19 @@ def api_set_inspection_status(line_id, tower_label):
 VALID_ZONES = {'red', 'yellow', 'green'}
 
 
-def _pilot_or_admin_guard():
+def _pilot_or_admin_guard(line_id):
     guard = _login_guard()
     if guard:
         return guard
-    if session.get('role') not in ('Pilot', 'Admin'):
+    if session.get('role') == 'Admin':
+        return None
+    if session.get('role') != 'Pilot':
         return jsonify({'error': 'Only Pilot and Admin accounts can set a tower\'s zone.'}), 403
+    line = Line.query.get(line_id)
+    if not line:
+        return jsonify({'error': 'Line not found.'}), 404
+    if not can_access_line(line):
+        return jsonify({'error': "This line isn't assigned to you."}), 403
     return None
 
 
@@ -1529,11 +2292,13 @@ def api_set_tower_zone(line_id, tower_label):
     """Pilot's required risk-zone classification for a tower — set before
     capturing a photo there. Admin can also set/correct it, but Client
     never can (view-only, same as everything else client-facing)."""
-    guard = _pilot_or_admin_guard()
+    guard = _pilot_or_admin_guard(line_id)
     if guard:
         return guard
-    Line.query.get_or_404(line_id)
+    line = Line.query.get_or_404(line_id)
     tower_label = tower_label.strip()
+    if _kml_tower_coordinates(line, tower_label) is None:
+        return jsonify({'error': 'Tower was not found in this line\'s KML.'}), 400
     data = request.get_json(force=True, silent=True) or {}
     zone = (data.get('zone') or '').strip().lower()
     if zone not in VALID_ZONES:
@@ -1555,11 +2320,13 @@ def api_pilot_submit_tower(line_id, tower_label):
     """Pilot's "done here" for a tower — zone must already be set; photos
     themselves come from the actual drone, not through this app, so
     there's nothing to upload here. This just closes out the visit."""
-    guard = _pilot_or_admin_guard()
+    guard = _pilot_or_admin_guard(line_id)
     if guard:
         return guard
-    Line.query.get_or_404(line_id)
+    line = Line.query.get_or_404(line_id)
     tower_label = tower_label.strip()
+    if _kml_tower_coordinates(line, tower_label) is None:
+        return jsonify({'error': 'Tower was not found in this line\'s KML.'}), 400
 
     status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
     if not status or not status.zone:
@@ -1757,6 +2524,10 @@ def api_assign_sme(line_id):
         assigned_by=session.get('user_name', ''), seen_by_sme=False,
     )
     db.session.add(assignment)
+    project = line.division.project if line.division else None
+    notify_user(sme.id, f'New line assigned — {line.name}',
+                f'{project.name if project else "Project"} · assigned by {session.get("user_name", "Admin")}.',
+                'assignment', f'/projects/{project.id}/map?line={line.id}' if project else '')
     ActivityLog.log(action='assign_sme', entity_type='Line', entity_name=line.name,
                      performed_by=session.get('user_name', ''), role=session.get('role', ''),
                      details=f'Assigned to SME {sme.username}')
@@ -1827,8 +2598,26 @@ def api_sme_assignments():
         entry['project_id'] = project.id if project else None
         entry['project_module'] = project.module if project else ''
         entry['tower_count'] = line.tower_count if line else 0
-        entry['towers_done'] = (TowerInspectionStatus.query
-                                 .filter_by(line_id=a.line_id, inspection_done=True).count()) if line else 0
+        photos = TowerPhoto.query.filter_by(line_id=a.line_id).order_by(TowerPhoto.id.asc()).all() if line else []
+        uploaded_labels = sorted(
+            {p.tower_label for p in photos if p.tower_label},
+            key=lambda value: [(0, int(part)) if part.isdigit() else (1, part.casefold()) for part in re.split(r'(\d+)', value)],
+        )
+        done_labels = {
+            row.tower_label for row in
+            TowerInspectionStatus.query.filter_by(line_id=a.line_id, inspection_done=True).all()
+        } if line else set()
+        pending_labels = [label for label in uploaded_labels if label not in done_labels]
+        thermal_photos = [photo for photo in photos if photo.is_thermal_image()]
+        rgb_photos = [photo for photo in photos if not photo.is_thermal_image()]
+        entry['uploaded_towers'] = len(uploaded_labels)
+        entry['towers_done'] = len(done_labels)
+        entry['review_pending'] = len(pending_labels)
+        entry['pending_tower_labels'] = pending_labels
+        entry['next_pending_tower'] = pending_labels[0] if pending_labels else ''
+        entry['rgb_images'] = len(rgb_photos)
+        entry['thermal_images'] = len(thermal_photos)
+        entry['client_visible_towers'] = len(done_labels)
         entry['days_since_assigned'] = (datetime.utcnow() - a.assigned_at).days if a.assigned_at else 0
         out.append(entry)
     return jsonify({'assignments': out})
@@ -1863,6 +2652,8 @@ def api_pilot_capture_photo(line_id):
     if guard:
         return guard
     line = Line.query.get_or_404(line_id)
+    if not can_access_line(line):
+        return jsonify({'error': "This line isn't assigned to you."}), 403
 
     tower_label = (request.form.get('tower') or '').strip()
     if not tower_label:
@@ -1876,13 +2667,18 @@ def api_pilot_capture_photo(line_id):
     if not image_file or not image_file.filename:
         return jsonify({'error': 'An image file is required.'}), 400
 
+    tower_coords = _kml_tower_coordinates(line, tower_label)
+    if tower_coords is None:
+        return jsonify({'error': 'Tower was not found in this line\'s KML.'}), 400
+    tower_lat, tower_lng = tower_coords
+
     try:
-        tower_lat = float(request.form.get('tower_lat'))
-        tower_lng = float(request.form.get('tower_lng'))
         capture_lat = float(request.form.get('capture_lat'))
         capture_lng = float(request.form.get('capture_lng'))
     except (TypeError, ValueError):
         return jsonify({'error': 'Missing location data — GPS must be available to capture.'}), 400
+    if not (-90 <= capture_lat <= 90) or not (-180 <= capture_lng <= 180):
+        return jsonify({'error': 'Capture GPS coordinates are out of range.'}), 400
 
     dist_m = _haversine_km(capture_lat, capture_lng, tower_lat, tower_lng) * 1000
     if dist_m > TOWER_PHOTO_GPS_BUFFER_M:
@@ -1891,14 +2687,15 @@ def api_pilot_capture_photo(line_id):
                      f"{TOWER_PHOTO_GPS_BUFFER_M}m to capture it. Please move to the correct location."
         }), 400
 
-    saved = _save_upload(image_file, 'tower_photos', IMAGE_EXTS)
+    project = line.division.project if line.division else None
+    saved, thumb = _save_tower_photo(image_file, project, line.division, line, tower_label, IMAGE_EXTS)
     if saved is None:
         return jsonify({'error': 'Image must be a .jpg, .png, or .webp file.'}), 400
     if saved == '':
         return jsonify({'error': 'An image file is required.'}), 400
 
     photo = TowerPhoto(
-        line_id=line_id, tower_label=tower_label, image_path=saved,
+        line_id=line_id, tower_label=tower_label, image_path=saved, thumbnail_path=thumb,
         uploaded_by=session.get('user_name', ''),
         gps_lat=capture_lat, gps_lng=capture_lng,
     )
@@ -1913,12 +2710,24 @@ def api_pilot_capture_photo(line_id):
 
 @projects_bp.route('/api/tower-photos/<int:photo_id>', methods=['DELETE'])
 def api_delete_tower_photo(photo_id):
+    """Deletes the DB row and its actual file(s) on disk — both the raw
+    copy and the defects/ duplicate if one was ever made. Previously
+    only removed the database row, silently leaving the real file(s)
+    behind on every single-photo delete."""
     guard = _admin_guard()
     if guard:
         return guard
     photo = TowerPhoto.query.get_or_404(photo_id)
+
+    stored_paths = {photo.image_path, photo.thumbnail_path, photo.defect_copy_path}
+    stored_paths.update(
+        event.evidence_image_path
+        for defect in photo.defects for event in defect.resolution_events
+        if event.evidence_image_path
+    )
     db.session.delete(photo)
     db.session.commit()
+    _cleanup_deleted_files(stored_paths, f'tower photo {photo_id}')
     return jsonify({'deleted': photo_id})
 
 
@@ -1931,6 +2740,9 @@ def api_delete_tower_photo(photo_id):
 @projects_bp.route('/api/lines/<int:line_id>/corridor-photos', methods=['GET'])
 def api_list_corridor_photos(line_id):
     guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
     if guard:
         return guard
     Line.query.get_or_404(line_id)
@@ -1949,6 +2761,12 @@ def api_upload_corridor_photo(line_id):
     if not image_file or not image_file.filename:
         return jsonify({'error': 'An image file is required.'}), 400
 
+    image_file.stream.seek(0)
+    content_hash = hashlib.sha256(image_file.read()).hexdigest()
+    image_file.stream.seek(0)
+    if CorridorPhoto.query.filter_by(line_id=line_id, content_hash=content_hash).first():
+        return jsonify({'error': f'"{image_file.filename}" is already uploaded for this line — skipped as a duplicate.'}), 400
+
     # No tower/distance check here (that's the whole point of a corridor
     # photo — it can be anywhere) but GPS itself is still required, since
     # there'd be nowhere to put its map dot otherwise.
@@ -1965,9 +2783,15 @@ def api_upload_corridor_photo(line_id):
     if saved == '':
         return jsonify({'error': 'An image file is required.'}), 400
 
+    thumb_path = _generate_flat_thumbnail(
+        current_app.root_path if hasattr(current_app, 'root_path') else '.',
+        'corridor_photos', os.path.basename(saved),
+    )
+
     photo = CorridorPhoto(
         line_id=line_id, image_path=saved, gps_lat=gps[0], gps_lng=gps[1],
-        uploaded_by=session.get('user_name', ''),
+        uploaded_by=session.get('user_name', ''), thumbnail_path=thumb_path,
+        content_hash=content_hash,
     )
     db.session.add(photo)
     db.session.commit()
@@ -1992,8 +2816,10 @@ def api_delete_corridor_photo(photo_id):
     if guard:
         return guard
     photo = CorridorPhoto.query.get_or_404(photo_id)
+    stored_paths = {photo.image_path, photo.thumbnail_path}
     db.session.delete(photo)
     db.session.commit()
+    _cleanup_deleted_files(stored_paths, f'corridor photo {photo_id}')
     return jsonify({'deleted': photo_id})
 
 
@@ -2015,7 +2841,13 @@ def api_list_tower_defects(photo_id):
     guard = _login_guard()
     if guard:
         return guard
-    TowerPhoto.query.get_or_404(photo_id)
+    guard = _photo_access_guard(photo_id)
+    if guard:
+        return guard
+    photo = TowerPhoto.query.get_or_404(photo_id)
+    guard = _client_photo_release_guard(photo)
+    if guard:
+        return guard
     defects = (TowerDefect.query.filter_by(tower_photo_id=photo_id)
                .order_by(TowerDefect.created_at.asc()).all())
     return jsonify({'defects': [d.to_dict() for d in defects]})
@@ -2054,9 +2886,14 @@ def api_create_tower_defect(photo_id):
     if severity not in VALID_SEVERITIES:
         severity = 'Minor'
 
-    status = (data.get('status') or 'OK').strip()
-    if status not in VALID_DEFECT_STATUSES:
-        status = 'OK'
+    # Status vocabulary is now per defect-type (a Number Plate is
+    # checked as present/missing/damaged; Tower Painting Condition is a
+    # Good/Fair/Poor call; a clearance check is Within/Not Within Limit)
+    # rather than one fixed list — maintaining a server-side enum that
+    # has to mirror the client-side per-type mapping exactly would only
+    # create a way for the two to drift out of sync, so this just keeps
+    # it a short descriptive string instead of validating against a set.
+    status = (data.get('status') or 'OK').strip()[:40] or 'OK'
 
     defect = TowerDefect(
         tower_photo_id=photo_id,
@@ -2071,11 +2908,101 @@ def api_create_tower_defect(photo_id):
         created_by=session.get('user_name', ''),
     )
     db.session.add(defect)
+    if severity == 'Critical':
+        line = Line.query.get(photo.line_id)
+        project = line.division.project if line and line.division else None
+        notify_users([uid for uid in admin_user_ids() if uid != session.get('user_id')],
+                     f'Critical defect — Tower {photo.tower_label}',
+                     defect.component_name or defect.defect_type or 'A critical defect was marked.',
+                     'critical', f'/projects/{project.id}/map?line={photo.line_id}' if project else '')
+    # First defect ever marked on this photo — make its permanent copy
+    # under .../defects/ now, so the raw/ copy can be safely deleted
+    # later without losing what this marking depends on.
+    _duplicate_photo_for_defects(photo)
     ActivityLog.log(action='mark_defect', entity_type='TowerDefect',
                      entity_name=f"{defect.component_name or 'Defect'} — Tower {photo.tower_label}",
                      performed_by=session.get('user_name', ''), role=session.get('role', ''))
     db.session.commit()
     return jsonify(defect.to_dict()), 201
+
+
+@projects_bp.route('/api/tower-defects/<int:defect_id>/resolve', methods=['POST'])
+def api_resolve_tower_defect(defect_id):
+    """Marks a defect Closed (rectified in the field) or reopens it.
+    Available to both Admin and Client sessions — unlike marking or
+    deleting a defect, closing one is a real-world fact the client
+    often confirms just as much as Drogo does, so both can record it."""
+    guard = _admin_or_client_guard()
+    if guard:
+        return guard
+    defect = TowerDefect.query.get_or_404(defect_id)
+    guard = _photo_access_guard(defect.tower_photo_id)
+    if guard:
+        return guard
+    guard = _client_photo_release_guard(defect.photo)
+    if guard:
+        return guard
+
+    data = request.form if request.content_type and request.content_type.startswith('multipart/form-data') else (request.get_json(force=True, silent=True) or {})
+    action = (data.get('action') or 'close').strip().lower()
+    if action not in ('close', 'reopen'):
+        return jsonify({'error': "action must be 'close' or 'reopen'."}), 400
+
+    comment = (data.get('comment') or '').strip()
+    if not comment:
+        message = 'A comment explaining what was fixed is required to close a defect.' if action == 'close' else 'A reason is required to reopen a defect.'
+        return jsonify({'error': message}), 400
+
+    evidence_path = ''
+    evidence = request.files.get('evidence_image')
+    if evidence and evidence.filename:
+        if action != 'close':
+            return jsonify({'error': 'Rectification evidence can be uploaded only when closing a defect.'}), 400
+        evidence_path = _save_upload(evidence, 'defect_rectifications', IMAGE_EXTS)
+        if evidence_path is None:
+            return jsonify({'error': 'Rectification evidence must be a .jpg, .png, or .webp image.'}), 400
+
+    from_status = defect.resolution_status or 'Open'
+    if action == 'close':
+        defect.resolution_status = 'Closed'
+        defect.resolved_by = session.get('user_name', '')
+        defect.resolved_at = datetime.utcnow()
+        defect.resolution_comment = comment
+    else:
+        defect.resolution_status = 'Open'
+        defect.resolved_by = ''
+        defect.resolved_at = None
+        defect.resolution_comment = ''
+
+    event = DefectResolutionEvent(
+        defect=defect,
+        action=action,
+        from_status=from_status,
+        to_status=defect.resolution_status,
+        comment=comment,
+        evidence_image_path=evidence_path or '',
+        changed_by_user_id=session.get('user_id'),
+        changed_by_name=session.get('user_name', ''),
+        changed_by_role=session.get('role', ''),
+    )
+    db.session.add(event)
+    photo = defect.photo
+    line = Line.query.get(photo.line_id)
+    project = line.division.project if line and line.division else None
+    title_action = 'closed' if action == 'close' else 'reopened'
+    recipients = set(admin_user_ids())
+    if project:
+        recipients.update(user.id for user in project.allowed_users)
+    recipients.discard(session.get('user_id'))
+    notify_users(recipients, f'Defect {title_action} — Tower {photo.tower_label}',
+                 f'{defect.component_name or defect.defect_type or "Defect"} was {title_action} by {session.get("user_name", "User")}.',
+                 'defect', f'/projects/{project.id}/map?line={photo.line_id}' if project else '')
+
+    ActivityLog.log(action=f'{action}_defect', entity_type='TowerDefect',
+                     entity_name=f"{defect.component_name or 'Defect'} — Tower {defect.photo.tower_label}",
+                     performed_by=session.get('user_name', ''), role=session.get('role', ''))
+    db.session.commit()
+    return jsonify(defect.to_dict())
 
 
 @projects_bp.route('/api/tower-defects/<int:defect_id>', methods=['DELETE'])
@@ -2084,9 +3011,75 @@ def api_delete_tower_defect(defect_id):
     guard = _inspect_guard_for_photo(defect.tower_photo_id)
     if guard:
         return guard
+    evidence_paths = {event.evidence_image_path for event in defect.resolution_events if event.evidence_image_path}
     db.session.delete(defect)
     db.session.commit()
+    _cleanup_deleted_files(evidence_paths, f'tower defect {defect_id}')
     return jsonify({'deleted': defect_id})
+
+
+@projects_bp.route('/api/lines/<int:line_id>/delete-raw-images', methods=['POST'])
+def api_delete_raw_images(line_id):
+    """Safely remove only redundant RGB originals.
+
+    Radiometric thermal originals are never deleted because the embedded DJI
+    data is required for future measurements. RGB originals are removed only
+    when a verified full-quality defect/evidence copy already exists. Photos
+    without a surviving copy are reported as skipped and remain untouched.
+    """
+    guard = _admin_guard()
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+
+    photos = TowerPhoto.query.filter_by(line_id=line_id).all()
+    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
+
+    deleted_count = 0
+    freed_bytes = 0
+    skipped_thermal = 0
+    skipped_no_copy = 0
+    for photo in photos:
+        if photo.raw_deleted or not photo.image_path:
+            continue
+        if photo.is_thermal_image():
+            skipped_thermal += 1
+            continue
+        # A photo with defects but no duplicate yet (shouldn't normally
+        # happen — duplication happens at defect-creation time — but
+        # never delete evidence on the strength of an assumption) gets
+        # one made right now before its raw copy is touched.
+        if photo.defects and not photo.defect_copy_path:
+            _duplicate_photo_for_defects(photo)
+
+        copy_path = os.path.join(base_dir, 'static', photo.defect_copy_path) if photo.defect_copy_path else ''
+        if not copy_path or not os.path.isfile(copy_path):
+            skipped_no_copy += 1
+            continue
+
+        full_path = os.path.join(base_dir, 'static', photo.image_path)
+        if os.path.isfile(full_path):
+            try:
+                freed_bytes += os.path.getsize(full_path)
+                os.remove(full_path)
+                deleted_count += 1
+            except OSError:
+                continue
+        if not os.path.exists(full_path):
+            photo.raw_deleted = True
+
+    db.session.commit()
+    ActivityLog.log(action='delete_raw_images', entity_type='Line', entity_name=line.name,
+                     performed_by=session.get('user_name', ''), role=session.get('role', ''),
+                     details=(f'Deleted {deleted_count} redundant RGB original(s), freed {freed_bytes} bytes; '
+                              f'skipped {skipped_thermal} thermal and {skipped_no_copy} unprotected photo(s)'))
+    db.session.commit()
+    return jsonify({
+        'deleted_count': deleted_count,
+        'freed_bytes': freed_bytes,
+        'skipped_thermal': skipped_thermal,
+        'skipped_no_preserved_copy': skipped_no_copy,
+    })
 
 
 # ── Thermal point-temperature measurements ──────────────────────────────
@@ -2101,7 +3094,13 @@ def api_list_thermal_points(photo_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _photo_access_guard(photo_id)
+    if guard:
+        return guard
     photo = TowerPhoto.query.get_or_404(photo_id)
+    guard = _client_photo_release_guard(photo)
+    if guard:
+        return guard
     points = (ThermalPoint.query.filter_by(tower_photo_id=photo_id)
               .order_by(ThermalPoint.created_at.asc()).all())
 
@@ -2238,7 +3237,13 @@ def api_measure_thermal_ephemeral(photo_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _photo_access_guard(photo_id)
+    if guard:
+        return guard
     photo = TowerPhoto.query.get_or_404(photo_id)
+    guard = _client_photo_release_guard(photo)
+    if guard:
+        return guard
     data = request.get_json(force=True, silent=True) or {}
 
     result, err_response, err_status = _validate_and_measure_thermal(photo, data)
@@ -2279,6 +3284,147 @@ def api_delete_thermal_point(point_id):
     return jsonify({'deleted': point_id})
 
 
+# ── Source-backed AI inspection summary ─────────────────────────────────
+
+def _tower_summary_sources(line_id, tower_label):
+    photos = TowerPhoto.query.filter_by(line_id=line_id, tower_label=tower_label).all()
+    photo_by_id = {p.id: p for p in photos}
+    photo_ids = list(photo_by_id)
+    if not photo_ids:
+        return []
+    sources = []
+    defects = (TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids))
+               .order_by(TowerDefect.id.asc()).limit(200).all())
+    for defect in defects:
+        photo = photo_by_id[defect.tower_photo_id]
+        sources.append({
+            'id': f'D{defect.id}', 'kind': 'defect', 'record_id': defect.id,
+            'photo_id': photo.id, 'url': f'/static/{photo.display_image_path()}',
+            'title': f'{defect.severity or "Minor"} {defect.defect_type or "defect"}',
+            'fact': (f'Component: {defect.component_name or "unspecified"}; location: {defect.location or "unspecified"}; '
+                     f'defect: {defect.defect_type or "unspecified"}; severity: {defect.severity or "Minor"}; '
+                     f'condition: {defect.status or "OK"}; resolution: {defect.resolution_status or "Open"}; '
+                     f'observation: {defect.observation or "none"}.')
+        })
+    points = (ThermalPoint.query.filter(ThermalPoint.tower_photo_id.in_(photo_ids))
+              .order_by(ThermalPoint.id.asc()).limit(200).all())
+    for point in points:
+        photo = photo_by_id[point.tower_photo_id]
+        temp = 'unavailable' if point.avg_c is None else f'{point.avg_c:.2f} C average'
+        span = '' if point.min_c is None or point.max_c is None else f', {point.min_c:.2f}-{point.max_c:.2f} C range'
+        sources.append({
+            'id': f'T{point.id}', 'kind': 'thermal', 'record_id': point.id,
+            'photo_id': photo.id, 'url': f'/static/{photo.display_image_path()}',
+            'title': point.label or f'Thermal measurement {point.id}',
+            'fact': f'Label: {point.label or "unlabelled"}; shape: {point.shape_type or "point"}; temperature: {temp}{span}; error: {point.error or "none"}.'
+        })
+    return sources
+
+
+@projects_bp.route('/api/lines/<int:line_id>/towers/<path:tower_label>/ai-summary', methods=['GET'])
+def api_get_ai_inspection_summary(line_id, tower_label):
+    guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
+    tower_label = tower_label.strip()
+    if session.get('role') == 'Client User':
+        guard = _client_tower_release_guard(line_id, tower_label)
+        if guard:
+            return guard
+    summary = AiInspectionSummary.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    if summary and session.get('role') == 'Client User' and not summary.is_shared:
+        summary = None
+    return jsonify({'summary': summary.to_dict() if summary else None})
+
+
+@projects_bp.route('/api/lines/<int:line_id>/towers/<path:tower_label>/ai-summary', methods=['POST'])
+def api_generate_ai_inspection_summary(line_id, tower_label):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+    tower_label = tower_label.strip()
+    status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    if not status or not status.inspection_done:
+        return jsonify({'error': 'Mark this tower Inspection Done before generating its AI summary.'}), 400
+    api_key = os.environ.get('GEMINI_API_KEY_OVERRIDE') or os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'GEMINI_API_KEY is not configured.'}), 503
+    sources = _tower_summary_sources(line_id, tower_label)
+    if not sources:
+        return jsonify({'error': 'This tower has no recorded defect or thermal findings to summarize.'}), 400
+    allowed_ids = {source['id'] for source in sources}
+    facts = '\n'.join(f'[{source["id"]}] {source["fact"]}' for source in sources)
+    prompt = f'''Create a concise engineering inspection summary for tower {tower_label} on line {line.name}.
+Use ONLY the source facts below. Do not infer causes, urgency, safety, or repairs that are not explicitly recorded.
+Return strict JSON only: {{"findings":[{{"text":"one factual conclusion","source_ids":["D1"]}}]}}.
+Every finding must contain at least one exact source ID. Prefer 3-8 useful findings, grouping related records when accurate.
+
+SOURCE FACTS
+{facts}'''
+    try:
+        from google import genai
+        from google.genai import types
+        # Keep a strong reference to the SDK client until the response is
+        # complete.  Chaining ``genai.Client(...).models.generate_content``
+        # lets newer SDK versions dispose the temporary Client while its HTTP
+        # transport is still in use, producing "client has been closed".
+        client = genai.Client(api_key=api_key)
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.1-flash-lite', contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type='application/json', temperature=0.1),
+            )
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        parsed = json.loads(response.text or '{}')
+        findings = parsed.get('findings') if isinstance(parsed, dict) else None
+        if not isinstance(findings, list) or not findings:
+            raise ValueError('The AI returned no usable findings.')
+        validated = []
+        for finding in findings[:12]:
+            text_value = str(finding.get('text') or '').strip()[:800]
+            source_ids = [str(value) for value in (finding.get('source_ids') or [])]
+            source_ids = list(dict.fromkeys(value for value in source_ids if value in allowed_ids))
+            if not text_value or not source_ids:
+                raise ValueError('The AI returned a finding without a valid source reference.')
+            validated.append({'text': text_value, 'source_ids': source_ids})
+    except Exception as exc:
+        current_app.logger.exception('AI summary generation failed for line %s tower %s', line_id, tower_label)
+        return jsonify({'error': f'AI summary could not be generated safely: {exc}'}), 502
+
+    summary = AiInspectionSummary.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    if not summary:
+        summary = AiInspectionSummary(line_id=line_id, tower_label=tower_label)
+        db.session.add(summary)
+    summary.findings_json = json.dumps(validated)
+    summary.sources_json = json.dumps([{k: v for k, v in source.items() if k != 'fact'} for source in sources])
+    summary.is_shared = False  # regeneration always requires an explicit new Client release
+    summary.generated_by_user_id = session.get('user_id')
+    summary.generated_by_name = session.get('user_name', '')
+    summary.generated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'summary': summary.to_dict()})
+
+
+@projects_bp.route('/api/ai-inspection-summaries/<int:summary_id>/sharing', methods=['PATCH'])
+def api_share_ai_inspection_summary(summary_id):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    summary = AiInspectionSummary.query.get_or_404(summary_id)
+    data = request.get_json(force=True, silent=True) or {}
+    summary.is_shared = bool(data.get('is_shared'))
+    db.session.commit()
+    return jsonify({'summary': summary.to_dict()})
+
+
 # ── Per-tower RGB Visual Inspection Report ──────────────────────────────
 # Generation is Admin-only; once generated, the PDF is stored on disk with
 # a TowerReport row pointing at it, so a Client session can download the
@@ -2293,10 +3439,16 @@ def api_get_tower_report(line_id):
     guard = _login_guard()
     if guard:
         return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
     Line.query.get_or_404(line_id)
     tower_label = (request.args.get('tower') or '').strip()
     if not tower_label:
         return jsonify({'error': 'tower is required.'}), 400
+    guard = _client_tower_release_guard(line_id, tower_label)
+    if guard:
+        return guard
     report = (TowerReport.query
               .filter_by(line_id=line_id, tower_label=tower_label)
               .order_by(TowerReport.generated_at.desc()).first())
@@ -2339,7 +3491,7 @@ def api_generate_tower_report(line_id):
     for d in defects:
         photo = photo_by_id.get(d.tower_photo_id)
         entry = d.to_dict()
-        entry['image_path'] = photo.image_path if photo else ''
+        entry['image_path'] = photo.display_image_path() if photo else ''
         defect_dicts.append(entry)
 
     # Thermal — RGB always comes first in the report, thermal appended
@@ -2355,7 +3507,7 @@ def api_generate_tower_report(line_id):
     for pt in thermal_points:
         thermal_by_photo.setdefault(pt.tower_photo_id, []).append(pt.to_dict())
     thermal_photo_dicts = [
-        {'image_path': photo_by_id[photo_id].image_path if photo_by_id.get(photo_id) else '', 'points': pts}
+        {'image_path': photo_by_id[photo_id].display_image_path() if photo_by_id.get(photo_id) else '', 'points': pts}
         for photo_id, pts in thermal_by_photo.items()
     ]
 
@@ -2418,6 +3570,12 @@ def api_download_tower_report(report_id):
     if guard:
         return guard
     report = TowerReport.query.get_or_404(report_id)
+    guard = _line_access_guard(report.line_id)
+    if guard:
+        return guard
+    guard = _client_tower_release_guard(report.line_id, report.tower_label)
+    if guard:
+        return guard
     full_path = os.path.join(current_app.root_path, 'static', report.report_path)
     if not os.path.exists(full_path):
         return jsonify({'error': 'Report file not found — try generating it again.'}), 404

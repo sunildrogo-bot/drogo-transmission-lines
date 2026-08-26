@@ -42,6 +42,35 @@
   .twd-sev-tag.sev-Critical{background:rgba(201,75,66,.12);color:var(--danger);}
   .twd-sev-tag.sev-Major{background:rgba(224,165,58,.15);color:#a06a1a;}
   .twd-sev-tag.sev-Minor{background:rgba(31,157,104,.12);color:var(--success);}
+  .twd-td-resolution{white-space:nowrap;}
+  .twd-resolve-link{margin-left:8px;font-size:11px;font-weight:700;color:var(--accent);text-decoration:none;cursor:pointer;}
+  .twd-resolve-link:hover{text-decoration:underline;}
+  .twd-modal-overlay{position:fixed;inset:0;background:rgba(6,8,12,.55);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px;}
+  .twd-modal-box{background:#fff;border-radius:14px;padding:22px 24px;max-width:360px;width:100%;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+  .twd-modal-msg{font-size:14px;color:var(--text-primary);margin-bottom:14px;font-weight:600;}
+  .twd-comment-textarea{width:100%;padding:10px 12px;margin-bottom:16px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;resize:vertical;outline:none;}
+  .twd-comment-textarea:focus{border-color:var(--accent);}
+  .twd-modal-actions{display:flex;justify-content:flex-end;gap:10px;}
+  .twd-modal-cancel{padding:9px 16px;border-radius:8px;border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;cursor:pointer;}
+  .twd-modal-ok{padding:9px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;}
+  .twd-report-box{margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .twd-report-link{font-size:12px;font-weight:700;color:#fff;background:var(--accent);padding:7px 14px;border-radius:var(--radius-sm);text-decoration:none;}
+  .twd-report-link:hover{opacity:.88;}
+  .twd-report-meta{font-size:11.5px;color:var(--text-muted);}
+
+  .twd-ai{margin:0 0 18px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 18px;box-shadow:0 1px 3px rgba(27,30,36,.05);}
+  .twd-ai-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px;}
+  .twd-ai-title{font-size:13px;font-weight:800;color:var(--text-primary);}
+  .twd-ai-optional{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);border:1px solid var(--border);border-radius:20px;padding:3px 8px;}
+  .twd-ai-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .twd-ai-btn{font-size:11px;font-weight:700;padding:6px 12px;border-radius:20px;border:1px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer;}
+  .twd-ai-btn:disabled{opacity:.5;cursor:not-allowed;}
+  .twd-ai-share{font-size:11px;color:var(--text-secondary);display:inline-flex;align-items:center;gap:5px;}
+  .twd-ai-meta{font-size:10.5px;color:var(--text-muted);line-height:1.5;}
+  .twd-ai-error{font-size:11px;color:var(--danger);margin-top:7px;}
+  .twd-ai-finding{font-size:12px;color:var(--text-secondary);line-height:1.55;padding:10px 0;border-bottom:1px solid var(--border-soft);}
+  .twd-ai-finding:last-child{border-bottom:none;padding-bottom:0;}
+  .twd-ai-source{display:inline-block;margin:5px 5px 0 0;padding:3px 8px;border-radius:12px;background:var(--bg-elevated-2);color:var(--accent);font-size:10px;font-weight:700;text-decoration:none;}
 
   .twd-img-lightbox{display:none;position:fixed;inset:0;background:rgba(6,8,12,.9);z-index:2000;align-items:center;justify-content:center;}
   .twd-img-lightbox.open{display:flex;}
@@ -62,7 +91,7 @@
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
     <div class="nav-actions">
       <div class="nav-user">{{ project.module }} <span>/ {{ project.name }}</span></div>
-      <a href="{{ url_for('projects_bp.project_map', project_id=project.id) }}" class="btn-ghost">← Map</a>
+      <a href="{{ url_for('projects_bp.project_divisions', project_id=project.id) }}" class="btn-ghost">← Divisions</a>
     </div>
   </nav>
 
@@ -102,6 +131,8 @@
 {% block scripts %}
 <script>
   const TWD_LINES = {{ lines_data | tojson }};
+  const TWD_IS_ADMIN = {{ (session.role == 'Admin')|tojson }};
+  const CAN_CLOSE_DEFECTS = {{ (session.role in ('Admin', 'Client User'))|tojson }};
   let twdActiveLineId = null;
   let twdActiveTower = null;
 
@@ -131,6 +162,66 @@
     `).join('');
   }
 
+  function twdResolutionCell(d) {
+    const closed = d.resolution_status === 'Closed';
+    const tooltip = closed ? `Closed by ${d.resolved_by || ''}. ${d.resolution_comment || ''}` : '';
+    const badge = `<span class="twd-sev-tag ${closed ? 'sev-Minor' : 'sev-Major'}" title="${tooltip.replace(/"/g, '&quot;')}">${closed ? '✓ Closed' : 'Open'}</span>`;
+    if (!CAN_CLOSE_DEFECTS) return badge;
+    return `${badge}<a href="javascript:void(0)" class="twd-resolve-link" onclick="toggleTwdResolution(${d.id}, '${closed ? 'reopen' : 'close'}')">${closed ? 'Reopen' : 'Close'}</a>`;
+  }
+
+  function promptForTwdComment() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'twd-modal-overlay';
+      overlay.innerHTML = `
+        <div class="twd-modal-box">
+          <div class="twd-modal-msg">What was done to fix this defect?</div>
+          <textarea id="twd-comment-input" class="twd-comment-textarea" rows="3" placeholder="Required"></textarea>
+          <div class="twd-modal-actions">
+            <button type="button" class="twd-modal-cancel" id="twd-comment-cancel">Cancel</button>
+            <button type="button" class="twd-modal-ok" id="twd-comment-ok">Close Defect</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const input = overlay.querySelector('#twd-comment-input');
+      const cleanup = (result) => { overlay.remove(); resolve(result); };
+      overlay.querySelector('#twd-comment-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('#twd-comment-ok').onclick = () => {
+        const val = input.value.trim();
+        if (!val) { input.focus(); input.style.borderColor = 'var(--danger)'; return; }
+        cleanup(val);
+      };
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(null); });
+      setTimeout(() => input.focus(), 50);
+    });
+  }
+
+  async function toggleTwdResolution(id, action) {
+    let comment = null;
+    if (action === 'close') {
+      comment = await promptForTwdComment();
+      if (!comment) return;
+    }
+    try {
+      const res = await fetch(`/api/tower-defects/${id}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, comment }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Could not update this defect.');
+        return;
+      }
+      const updated = await res.json();
+      const cell = document.querySelector(`#twd-row-${id} .twd-td-resolution`);
+      if (cell) cell.innerHTML = twdResolutionCell(updated);
+    } catch (e) {
+      alert('Could not update this defect.');
+    }
+  }
+
   async function selectTower(label) {
     twdActiveTower = label;
     document.querySelectorAll('.twd-tower-item').forEach(el => {
@@ -151,13 +242,14 @@
       }
 
       const rows = defects.map(d => `
-        <tr>
-          <td class="twd-td-img">${d.image_url ? `<img src="${d.image_url}" alt="" data-shape-type="${d.shape_type || ''}" data-shape-coords='${JSON.stringify(d.shape_coords || [])}' onclick="openTwdLightbox(this)"/>` : '—'}</td>
+        <tr id="twd-row-${d.id}">
+          <td class="twd-td-img">${d.image_url ? `<img src="${d.thumbnail_url || d.image_url}" alt="" loading="lazy" data-full-src="${d.image_url}" data-shape-type="${d.shape_type || ''}" data-shape-coords='${JSON.stringify(d.shape_coords || [])}' onclick="openTwdLightbox(this)"/>` : '—'}</td>
           <td class="twd-td-title">${escapeHtmlTwd(d.component_name || '—')}</td>
           <td>${escapeHtmlTwd(d.defect_type || '—')}</td>
           <td>${escapeHtmlTwd(d.location || '—')}</td>
           <td><span class="twd-sev-tag sev-${d.severity}">${d.severity}</span></td>
           <td>${escapeHtmlTwd(d.status || '—')}</td>
+          <td class="twd-td-resolution">${twdResolutionCell(d)}</td>
           <td>${escapeHtmlTwd(d.created_at || '—')}${d.created_by ? ' · ' + escapeHtmlTwd(d.created_by) : ''}</td>
         </tr>
       `).join('');
@@ -166,18 +258,104 @@
         <div class="twd-right-head">
           <div class="twd-right-title">Tower ${escapeHtmlTwd(label)}</div>
           <div class="twd-right-sub">${line ? escapeHtmlTwd(line.division_name) + ' · ' + escapeHtmlTwd(line.name) + ' · ' : ''}${defects.length} defect${defects.length !== 1 ? 's' : ''}</div>
+          <div class="twd-report-box" id="twd-report-box">Checking for a report…</div>
         </div>
+        <div class="twd-ai" id="twd-ai-summary"><div class="twd-ai-meta">Loading optional AI summary…</div></div>
         <div class="twd-table-wrap">
           <table class="twd-table">
             <thead>
-              <tr><th style="width:52px;">Image</th><th>Component</th><th>Type</th><th>Position</th><th>Severity</th><th>Status</th><th>Marked</th></tr>
+              <tr><th style="width:52px;">Image</th><th>Component</th><th>Type</th><th>Position</th><th>Severity</th><th>Status</th><th>Resolution</th><th>Marked</th></tr>
             </thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
       `;
+      loadTwdReportStatus(twdActiveLineId, label);
+      loadTwdAiSummary();
     } catch (e) {
       rightPanel.innerHTML = '<div class="twd-right-placeholder">Could not load defects for this tower — please try again.</div>';
+    }
+  }
+
+  async function loadTwdReportStatus(lineId, label) {
+    const box = document.getElementById('twd-report-box');
+    if (!box) return;
+    try {
+      const res = await fetch(`/api/lines/${lineId}/tower-report?tower=${encodeURIComponent(label)}`);
+      const data = await res.json();
+      if (data.report) {
+        box.innerHTML = `<a href="${data.report.report_url}" target="_blank" class="twd-report-link">⬇ Download Report</a><span class="twd-report-meta">Generated ${escapeHtmlTwd(data.report.generated_at)}${data.report.generated_by ? ' by ' + escapeHtmlTwd(data.report.generated_by) : ''}</span>`;
+      } else {
+        box.innerHTML = `<span class="twd-report-meta">No report generated for this tower yet.</span>`;
+      }
+    } catch (e) {
+      box.innerHTML = '';
+    }
+  }
+
+  async function loadTwdAiSummary() {
+    const box = document.getElementById('twd-ai-summary');
+    if (!box || !twdActiveLineId || !twdActiveTower) return;
+    box.innerHTML = '<div class="twd-ai-meta">Loading optional AI summary…</div>';
+    try {
+      const res = await fetch(`/api/lines/${twdActiveLineId}/towers/${encodeURIComponent(twdActiveTower)}/ai-summary`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not load summary.');
+      renderTwdAiSummary(data.summary || null);
+    } catch (e) {
+      box.innerHTML = `<div class="twd-ai-head"><div><div class="twd-ai-title">AI Inspection Summary</div><div class="twd-ai-meta">Optional — it does not affect Inspection Done or Client release.</div></div><span class="twd-ai-optional">Optional</span></div><div class="twd-ai-error">${escapeHtmlTwd(e.message || 'Could not load summary.')}</div>`;
+    }
+  }
+
+  function renderTwdAiSummary(summary) {
+    const box = document.getElementById('twd-ai-summary');
+    if (!box) return;
+    let actions = '';
+    if (TWD_IS_ADMIN) {
+      actions = `<div class="twd-ai-actions"><button id="twd-ai-generate" class="twd-ai-btn" onclick="generateTwdAiSummary()">${summary ? 'Regenerate' : 'Generate'} Summary</button>`;
+      if (summary) actions += `<label class="twd-ai-share"><input type="checkbox" ${summary.is_shared ? 'checked' : ''} onchange="setTwdAiSharing(${summary.id},this.checked)"/> Share with Client</label>`;
+      actions += '</div>';
+    }
+    const head = `<div class="twd-ai-head"><div><div class="twd-ai-title">AI Inspection Summary</div><div class="twd-ai-meta">Optional — it does not affect Inspection Done, reports or Client release.</div></div><span class="twd-ai-optional">Optional</span></div>${actions}`;
+    if (!summary) {
+      box.innerHTML = head + `<div class="twd-ai-meta">${TWD_IS_ADMIN ? 'Available after Inspection Done when this tower has recorded defects or thermal measurements.' : 'No summary has been shared for this tower.'}</div>`;
+      return;
+    }
+    const sourceMap = Object.fromEntries((summary.sources || []).map(source => [source.id, source]));
+    const findings = (summary.findings || []).map(finding => {
+      const links = (finding.source_ids || []).map(id => sourceMap[id]).filter(Boolean).map(source => `<a class="twd-ai-source" href="${escapeHtmlTwd(source.url)}" target="_blank" rel="noopener" title="${escapeHtmlTwd(source.title || source.id)}">${escapeHtmlTwd(source.id)} · View source</a>`).join('');
+      return `<div class="twd-ai-finding">${escapeHtmlTwd(finding.text)}<div>${links}</div></div>`;
+    }).join('');
+    box.innerHTML = head + `<div class="twd-ai-meta">Generated ${escapeHtmlTwd(summary.generated_at)} by ${escapeHtmlTwd(summary.generated_by || 'Admin')} · ${summary.is_shared ? 'Client visible' : 'Internal only'}</div>${findings}`;
+  }
+
+  async function generateTwdAiSummary() {
+    if (!twdActiveLineId || !twdActiveTower) return;
+    const btn = document.getElementById('twd-ai-generate');
+    if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+    try {
+      const res = await fetch(`/api/lines/${twdActiveLineId}/towers/${encodeURIComponent(twdActiveTower)}/ai-summary`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not generate summary.');
+      renderTwdAiSummary(data.summary);
+    } catch (e) {
+      const box = document.getElementById('twd-ai-summary');
+      if (box) box.insertAdjacentHTML('beforeend', `<div class="twd-ai-error">${escapeHtmlTwd(e.message || 'Could not generate summary.')}</div>`);
+      const current = document.getElementById('twd-ai-generate');
+      if (current) { current.disabled = false; current.textContent = 'Generate Summary'; }
+    }
+  }
+
+  async function setTwdAiSharing(summaryId, isShared) {
+    try {
+      const res = await fetch(`/api/ai-inspection-summaries/${summaryId}/sharing`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_shared:isShared})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not update sharing.');
+      renderTwdAiSummary(data.summary);
+    } catch (e) {
+      await loadTwdAiSummary();
+      const box = document.getElementById('twd-ai-summary');
+      if (box) box.insertAdjacentHTML('beforeend', `<div class="twd-ai-error">${escapeHtmlTwd(e.message || 'Could not update sharing.')}</div>`);
     }
   }
 
@@ -191,7 +369,7 @@
   }
 
   function openTwdLightbox(imgEl) {
-    document.getElementById('twd-img-lightbox-img').src = imgEl.src;
+    document.getElementById('twd-img-lightbox-img').src = imgEl.dataset.fullSrc || imgEl.src;
     document.getElementById('twd-img-lightbox').classList.add('open');
     const svg = document.getElementById('twd-img-lightbox-svg');
     svg.innerHTML = '';

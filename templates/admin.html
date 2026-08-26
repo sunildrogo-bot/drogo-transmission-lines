@@ -112,6 +112,18 @@
   .dash-activity-main{font-size:12.5px;color:var(--text-primary);}
   .dash-activity-main b{font-weight:700;}
   .dash-activity-meta{font-size:11px;color:var(--text-muted);}
+  .dash-progress-scroll{overflow-x:auto;}
+  .dash-progress-table{width:100%;border-collapse:collapse;min-width:980px;}
+  .dash-progress-table th{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-muted);font-weight:800;text-align:left;padding:8px 9px;border-bottom:1px solid var(--border);white-space:nowrap;}
+  .dash-progress-table td{font-size:11.5px;color:var(--text-secondary);padding:10px 9px;border-bottom:1px solid var(--border-soft);vertical-align:middle;}
+  .dash-progress-table tr:last-child td{border-bottom:none;}
+  .dash-progress-name{font-weight:800;color:var(--text-primary);text-decoration:none;}
+  .dash-progress-name:hover{color:var(--accent);}
+  .dash-progress-bar{width:110px;height:7px;border-radius:6px;background:var(--bg-elevated-2);overflow:hidden;display:inline-block;vertical-align:middle;margin-right:6px;}
+  .dash-progress-fill{height:100%;background:var(--success);border-radius:6px;}
+  .dash-progress-pct{font-size:10.5px;font-weight:800;color:var(--text-primary);white-space:nowrap;}
+  .dash-progress-warn{color:var(--warning);font-weight:800;}
+  .dash-progress-good{color:var(--success);font-weight:800;}
 
   .dash-bar-chart{display:flex;align-items:flex-end;justify-content:center;gap:18px;height:160px;padding:0 4px;}
   .dash-bar-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;width:56px;}
@@ -152,9 +164,9 @@
     <div class="nav-actions">
       <div class="nav-user">Welcome, <span>{{ user_name.split()[0] }}</span></div>
       {% if can_switch_client %}
-      <a href="{{ url_for('switch_to_client') }}" class="btn-logout" style="background:var(--bg-elevated-2);color:var(--text-primary);">Switch to Client</a>
+      <form method="POST" action="{{ url_for('switch_to_client') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout" style="background:var(--bg-elevated-2);color:var(--text-primary);">Switch to Client</button></form>
       {% endif %}
-      <a href="{{ url_for('logout') }}" class="btn-logout">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
     </div>
   </nav>
   <div class="admin-wrap">
@@ -185,6 +197,16 @@
           <div class="stat-card"><div class="stat-label">Total Users</div><div class="stat-value">—</div></div>
           <div class="stat-card"><div class="stat-label">Active Users</div><div class="stat-value">—</div></div>
           <div class="stat-card"><div class="stat-label">Active Pilots</div><div class="stat-value">—</div></div>
+        </div>
+
+        <div class="dash-panel" style="margin-bottom:20px;">
+          <div class="dash-panel-title-row">
+            <div>
+              <div class="dash-panel-title" style="margin-bottom:2px;">Project Progress</div>
+              <div style="font-size:10.5px;color:var(--text-muted);">Admin upload → SME review → Inspection Done → visible to Client</div>
+            </div>
+          </div>
+          <div id="dash-project-progress"><div class="dash-empty">Loading…</div></div>
         </div>
 
         <div class="dash-two-col">
@@ -297,9 +319,9 @@
         </div>
         <div class="add-user-form" id="add-user-form">
           <div class="auf-grid">
-            <div class="field"><label>Full Name</label><input type="text" placeholder="e.g. Ramesh Kumar"/></div>
-            <div class="field"><label>Phone Number</label><input type="tel" placeholder="+91 98765 43210"/></div>
-            <div class="field"><label>Email ID</label><input type="email" placeholder="ramesh@drogodrones.com"/></div>
+            <div class="field"><label>Full Name</label><input type="text" placeholder="Enter full name"/></div>
+            <div class="field"><label>Phone Number</label><input type="tel" placeholder="Enter phone number"/></div>
+            <div class="field"><label>Email ID</label><input type="email" placeholder="Enter email address"/></div>
             <div class="field">
               <label>Module Access</label>
               <select class="module-select">
@@ -310,7 +332,7 @@
             </div>
           </div>
           <div class="auf-actions" style="justify-content:space-between;align-items:center;">
-            <div style="font-size:11.5px;color:var(--text-muted);">A system-generated password will be emailed to the client.</div>
+            <div style="font-size:11.5px;color:var(--text-muted);">A one-time password setup link will be emailed to the client.</div>
             <div style="display:flex;gap:10px;">
               <button class="btn-ghost" onclick="toggleAddUserForm()">Cancel</button>
               <button class="btn-primary" onclick="saveUser()">Save User</button>
@@ -323,10 +345,7 @@
               <tr><th>Name</th><th>Phone</th><th>Email</th><th>Module Access</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td>Sunil Kumar</td><td>+91 98765 43210</td><td>sunil@drogodrones.com</td><td><span class="access-chip tline">Transmission Lines</span></td><td><span class="status-chip active">Active</span></td></tr>
-              <tr><td>Ramesh Patel</td><td>+91 91234 56780</td><td>ramesh@drogodrones.com</td><td><span class="access-chip tline">Transmission Lines</span></td><td><span class="status-chip active">Active</span></td></tr>
-              <tr><td>Anjali Sharma</td><td>+91 99887 76655</td><td>anjali@drogodrones.com</td><td><span class="access-chip lsurvey">Land Survey</span></td><td><span class="status-chip pending">Pending</span></td></tr>
-              <tr><td>Vikram Singh</td><td>+91 90909 12121</td><td>vikram@drogodrones.com</td><td><span class="access-chip chimney">Chimney Present</span></td><td><span class="status-chip active">Active</span></td></tr>
+              <tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Users will appear here after they are added.</td></tr>
             </tbody>
           </table>
         </div>
@@ -413,10 +432,40 @@ async function loadDashboardSummary() {
     renderRecentActivity(data.recent_activity || []);
     renderModuleChart(data.projects);
     renderActivityTrendChart(data.activity_trend || []);
+    renderProjectProgress(data.project_progress || []);
     document.getElementById('dash-count-tline').textContent = `${data.projects.transmission_line} project(s)`;
   } catch (e) {
     statsGrid.innerHTML = `<div class="activity-empty">Could not load statistics.</div>`;
   }
+}
+
+function renderProjectProgress(rows) {
+  const box = document.getElementById('dash-project-progress');
+  if (!rows.length) {
+    box.innerHTML = '<div class="dash-empty">No projects created yet.</div>';
+    return;
+  }
+  box.innerHTML = `
+    <div class="dash-progress-scroll">
+      <table class="dash-progress-table">
+        <thead><tr>
+          <th>Project</th><th>Total Towers</th><th>Not Captured</th><th>Admin Uploaded</th>
+          <th>SME Pending</th><th>Inspection Done / Client Visible</th>
+          <th>Open Defects</th><th>Closed Defects</th><th>Progress</th>
+        </tr></thead>
+        <tbody>${rows.map(p => `
+          <tr>
+            <td><a class="dash-progress-name" href="${escapeHtml(p.open_url)}">${escapeHtml(p.name)}</a><div style="font-size:9.5px;color:var(--text-muted);margin-top:2px;">${escapeHtml(p.module)}</div></td>
+            <td>${p.total_towers}</td>
+            <td class="${p.not_captured ? 'dash-progress-warn' : 'dash-progress-good'}">${p.not_captured}</td>
+            <td>${p.admin_uploaded_towers}<div style="font-size:9.5px;color:var(--text-muted);">${p.photos_uploaded} images</div></td>
+            <td class="${p.sme_review_pending ? 'dash-progress-warn' : 'dash-progress-good'}">${p.sme_review_pending}</td>
+            <td class="dash-progress-good">${p.inspection_done}</td>
+            <td>${p.open_defects}</td><td>${p.closed_defects}</td>
+            <td><span class="dash-progress-bar"><span class="dash-progress-fill" style="width:${Math.max(0, Math.min(100, p.completion_pct))}%"></span></span><span class="dash-progress-pct">${p.completion_pct}%</span></td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
 }
 
 function renderNeedsAttention(attn) {

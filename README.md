@@ -28,12 +28,22 @@ nova_flask/
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Start the development server
+# 2. Apply versioned database migrations
+flask --app app db upgrade
+
+# 3. Optional: load local demo data into a fresh database
+python seed_db.py
+
+# 4. Start the development server
 python app.py
 
-# 3. Open in browser
+# 5. Open in browser
 http://localhost:5000
 ```
+
+For an existing PostgreSQL database, back it up first and follow
+[`MIGRATION_GUIDE.md`](MIGRATION_GUIDE.md). The web server never changes the
+schema at startup.
 
 ## Key Improvements over Single-File HTML
 
@@ -46,25 +56,11 @@ http://localhost:5000
 | Security | Passwords visible in source | Passwords never sent to browser |
 | Extensibility | Hard to add features | Add new routes & templates easily |
 
-## Adding a Database (Next Step)
+## Database
 
-Replace the in-memory `users = []` list in `app.py` with SQLAlchemy:
-
-```bash
-pip install flask-sqlalchemy
-```
-
-```python
-from flask_sqlalchemy import SQLAlchemy
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nova.db'
-db = SQLAlchemy(app)
-
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100))
-    email = db.Column(db.String(120), unique=True)
-    password_hash = db.Column(db.String(200))
-```
+The application uses SQLAlchemy and supports SQLite for local development or
+PostgreSQL through `DATABASE_URL`. Schema changes live under `migrations/` and
+are applied with `flask --app app db upgrade`.
 
 ## Environment Variables (Production)
 

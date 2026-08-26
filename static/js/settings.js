@@ -1,29 +1,59 @@
 /* settings.js — Settings page: delete password, activity log, announcements */
 
 function settingsNav(viewId, el) {
-  document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active');
+  document.querySelectorAll('.settings-nav-item').forEach(t => t.classList.remove('active'));
+  const navItem = el || document.querySelector(`.settings-nav-item[data-settings-view="${viewId}"]`);
+  if (navItem) navItem.classList.add('active');
   document.querySelectorAll('.settings-view').forEach(v => v.classList.remove('active'));
-  document.getElementById(viewId).classList.add('active');
+  const view = document.getElementById(viewId);
+  if (!view) return;
+  view.classList.add('active');
 
-  if (viewId === 'view-activity') loadActivityLog();
-  if (viewId === 'view-announcements') loadAnnouncementsTab();
-  if (viewId === 'view-help') loadHelpTab();
-  if (viewId === 'view-projects') loadAllProjects();
+  if (viewId === 'view-security') loadActivityLog();
+  if (viewId === 'view-notifications') {
+    loadAnnouncementsTab();
+    loadHelpTab();
+  }
+  if (viewId === 'view-uploads') {
+    loadStorageSummary();
+    loadAllProjects();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('help-tab-badge')) refreshHelpBadge();
 
   // Cross-page links (the new-ticket dashboard popup, mainly) land here
-  // with ?view=help so the Raised Tickets tab opens automatically instead
-  // of always falling back to Delete Password.
+  // with ?view=help so Notifications opens automatically.
   const params = new URLSearchParams(window.location.search);
-  if (params.get('view') === 'help') {
-    const tab = document.querySelector('.settings-tab[onclick*="view-help"]');
-    if (tab) settingsNav('view-help', tab);
+  const requested = params.get('view');
+  const legacyViews = {
+    help: 'view-notifications', announcements: 'view-notifications',
+    projects: 'view-uploads', activity: 'view-security',
+    password: 'view-security', assistant: 'view-assistant'
+  };
+  if (legacyViews[requested]) {
+    settingsNav(legacyViews[requested]);
   }
 });
+
+async function loadStorageSummary() {
+  const total = document.getElementById('storage-total');
+  const files = document.getElementById('storage-files');
+  const mode = document.getElementById('storage-mode');
+  if (!total || !files || !mode) return;
+  try {
+    const res = await fetch('/api/settings/storage-summary');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Storage summary failed');
+    total.textContent = data.formatted_size || '0 B';
+    files.textContent = Number(data.file_count || 0).toLocaleString();
+    mode.textContent = data.storage_type || 'Application uploads folder';
+  } catch (e) {
+    total.textContent = 'Unavailable';
+    files.textContent = '—';
+  }
+}
 
 function escapeHtml(str) {
   const d = document.createElement('div');
@@ -278,10 +308,110 @@ async function loadAllProjects() {
         <td>${escapeHtml(p.detail)}</td>
         <td>${escapeHtml(p.created_at)}</td>
         <td style="text-align:right;">
+          <button type="button" class="browse-btn" onclick="openTowerBrowser(${p.id}, '${escapeHtml(p.name).replace(/'/g, "\\'")}')">Browse</button>
           <button type="button" class="ann-delete-btn" onclick="requestDelete({url:'${p.delete_url}', label:'${escapeHtml(p.name).replace(/'/g, "\\'")}', onSuccess: loadAllProjects})">Delete</button>
         </td>
       </tr>`).join('');
   } catch (e) {
     body.innerHTML = `<tr class="empty-row"><td colspan="5">Could not load projects.</td></tr>`;
+  }
+}
+
+// ── Project drill-down browser: project -> divisions -> lines -> towers ──
+let _tb = { level: 'divisions', projectId: null, projectName: '', divisionId: null, divisionName: '', lineId: null, lineName: '' };
+
+function openTowerBrowser(projectId, projectName) {
+  _tb = { level: 'divisions', projectId, projectName, divisionId: null, divisionName: '', lineId: null, lineName: '' };
+  document.getElementById('tb-modal-backdrop').classList.add('open');
+  tbLoadDivisions();
+}
+
+function closeTowerBrowser() {
+  document.getElementById('tb-modal-backdrop').classList.remove('open');
+}
+
+function tbRenderBreadcrumb() {
+  const parts = [`<a onclick="tbLoadDivisions()">${escapeHtml(_tb.projectName)}</a>`];
+  if (_tb.level === 'lines' || _tb.level === 'towers') {
+    parts.push('›', _tb.level === 'lines'
+      ? `<span>${escapeHtml(_tb.divisionName)}</span>`
+      : `<a onclick="tbLoadLines(${_tb.divisionId}, '${escapeHtml(_tb.divisionName).replace(/'/g, "\\'")}')">${escapeHtml(_tb.divisionName)}</a>`);
+  }
+  if (_tb.level === 'towers') {
+    parts.push('›', `<span>${escapeHtml(_tb.lineName)}</span>`);
+  }
+  document.getElementById('tb-breadcrumb').innerHTML = parts.join(' ');
+}
+
+async function tbLoadDivisions() {
+  _tb.level = 'divisions';
+  tbRenderBreadcrumb();
+  const body = document.getElementById('tb-modal-body');
+  body.innerHTML = `<div class="tb-empty">Loading…</div>`;
+  try {
+    const res = await fetch(`/api/settings/projects/${_tb.projectId}/divisions`);
+    const data = await res.json();
+    const divisions = data.divisions || [];
+    if (!divisions.length) { body.innerHTML = `<div class="tb-empty">No divisions in this project.</div>`; return; }
+    body.innerHTML = divisions.map(d => `
+      <div class="tb-row">
+        <div class="tb-row-main" onclick="tbLoadLines(${d.id}, '${escapeHtml(d.name).replace(/'/g, "\\'")}')">
+          <div class="tb-row-name">${escapeHtml(d.name)}</div>
+          <div class="tb-row-sub">${d.line_count} line${d.line_count !== 1 ? 's' : ''}</div>
+        </div>
+        <span class="tb-row-arrow">›</span>
+      </div>`).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="tb-empty">Could not load divisions.</div>`;
+  }
+}
+
+async function tbLoadLines(divisionId, divisionName) {
+  _tb.level = 'lines';
+  _tb.divisionId = divisionId;
+  _tb.divisionName = divisionName;
+  tbRenderBreadcrumb();
+  const body = document.getElementById('tb-modal-body');
+  body.innerHTML = `<div class="tb-empty">Loading…</div>`;
+  try {
+    const res = await fetch(`/api/settings/divisions/${divisionId}/lines`);
+    const data = await res.json();
+    const lines = data.lines || [];
+    if (!lines.length) { body.innerHTML = `<div class="tb-empty">No lines in this division.</div>`; return; }
+    body.innerHTML = lines.map(l => `
+      <div class="tb-row">
+        <div class="tb-row-main" onclick="tbLoadTowers(${l.id}, '${escapeHtml(l.name).replace(/'/g, "\\'")}')">
+          <div class="tb-row-name">${escapeHtml(l.name)}</div>
+          <div class="tb-row-sub">${l.tower_count} tower${l.tower_count !== 1 ? 's' : ''} planned</div>
+        </div>
+        <span class="tb-row-arrow">›</span>
+      </div>`).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="tb-empty">Could not load lines.</div>`;
+  }
+}
+
+async function tbLoadTowers(lineId, lineName) {
+  _tb.level = 'towers';
+  _tb.lineId = lineId;
+  _tb.lineName = lineName;
+  tbRenderBreadcrumb();
+  const body = document.getElementById('tb-modal-body');
+  body.innerHTML = `<div class="tb-empty">Loading…</div>`;
+  try {
+    const res = await fetch(`/api/settings/lines/${lineId}/towers`);
+    const data = await res.json();
+    const towers = data.towers || [];
+    if (!towers.length) { body.innerHTML = `<div class="tb-empty">No photos uploaded on this line yet — nothing to delete.</div>`; return; }
+    body.innerHTML = towers.map(t => `
+      <div class="tb-row">
+        <div class="tb-row-main" style="cursor:default;">
+          <div class="tb-row-name">Tower ${escapeHtml(t.label)}</div>
+          <div class="tb-row-sub">${t.photo_count} photo${t.photo_count !== 1 ? 's' : ''} · ${t.defect_count} defect${t.defect_count !== 1 ? 's' : ''}</div>
+        </div>
+        <button type="button" class="tb-delete-btn" onclick="requestDelete({url:'/api/settings/lines/${lineId}/towers/${encodeURIComponent(t.label)}', label:'Tower ${escapeHtml(t.label).replace(/'/g, "\\'")} (all photos and defects)', onSuccess: () => tbLoadTowers(${lineId}, '${escapeHtml(lineName).replace(/'/g, "\\'")}')})">Delete</button>
+      </div>`).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="tb-empty">Could not load towers.</div>`;
   }
 }

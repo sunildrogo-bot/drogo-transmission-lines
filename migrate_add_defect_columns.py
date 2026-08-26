@@ -5,14 +5,12 @@ Adds the columns used by the updated chimney defect features (defect type /
 area / height label / saved image path) to an EXISTING `chimney_defects`
 table, without touching any existing data.
 
-`ensure_defect_columns(app)` is called automatically every time the Flask
-app starts (see app.py) — so this fixes itself even if nobody remembers to
-run the CLI version below. It is idempotent and safe to run/import any
-number of times: it only ever adds columns that are actually missing, and
-never drops or alters existing ones.
+This is a deprecated compatibility utility retained only for installations
+that are still on an older release. It is no longer imported or executed by
+application startup. Current installations must use the versioned Flask-
+Migrate/Alembic revisions under `migrations/`.
 
-Manual/CLI usage (only needed if you want to run it standalone, e.g. before
-first deploying, or against a database the app itself isn't pointed at):
+Legacy manual usage (do not combine with the versioned migration workflow):
     python migrate_add_defect_columns.py
 """
 import sys
@@ -69,6 +67,8 @@ NEW_USER_COLUMNS = {
     'last_login_at': {'mssql': 'DATETIME', 'default': 'TIMESTAMP'},
     'photo_path':    {'mssql': 'NVARCHAR(255)', 'default': 'VARCHAR(255)'},
     'dashboard_notes': {'mssql': 'NVARCHAR(MAX)', 'default': 'TEXT'},
+    'reset_token':   {'mssql': 'NVARCHAR(64)', 'default': 'VARCHAR(64)'},
+    'reset_token_expires': {'mssql': 'DATETIME', 'default': 'TIMESTAMP'},
 }
 
 # For the generic 'projects' table (Transmission Line / Land Survey / TRANS /
@@ -79,6 +79,9 @@ NEW_GENERIC_PROJECT_COLUMNS = {
     'planned_divisions': {'mssql': 'INT',            'default': 'INTEGER'},
     'planned_towers':    {'mssql': 'INT',            'default': 'INTEGER'},
     'timeline':          {'mssql': 'NVARCHAR(150)',  'default': 'VARCHAR(150)'},
+    # Which inspection type(s) (RGB/Thermal) a project actually does,
+    # added after projects already existed.
+    'inspection_types':  {'mssql': 'NVARCHAR(MAX)',  'default': 'TEXT'},
 }
 
 NEW_DIVISION_COLUMNS = {
@@ -97,6 +100,10 @@ NEW_LINE_INFO_COLUMNS = {
 NEW_TOWER_DEFECT_COLUMNS = {
     'defect_type': {'mssql': 'NVARCHAR(100)', 'default': 'VARCHAR(100)'},
     'status':      {'mssql': 'NVARCHAR(20)',  'default': 'VARCHAR(20)'},
+    'resolution_status': {'mssql': 'NVARCHAR(20)', 'default': 'VARCHAR(20)'},
+    'resolved_by': {'mssql': 'NVARCHAR(120)', 'default': 'VARCHAR(120)'},
+    'resolved_at': {'mssql': 'DATETIME', 'default': 'TIMESTAMP'},
+    'resolution_comment': {'mssql': 'NVARCHAR(MAX)', 'default': 'TEXT'},
 }
 
 NEW_TOWER_INSPECTION_STATUS_COLUMNS = {
@@ -130,6 +137,9 @@ NEW_TOWER_PHOTO_COLUMNS = {
     'gps_lat': {'mssql': 'FLOAT', 'default': 'FLOAT'},
     'gps_lng': {'mssql': 'FLOAT', 'default': 'FLOAT'},
     'content_hash': {'mssql': 'NVARCHAR(64)', 'default': 'VARCHAR(64)'},
+    'defect_copy_path': {'mssql': 'NVARCHAR(255)', 'default': 'VARCHAR(255)'},
+    'raw_deleted': {'mssql': 'BIT', 'default': 'BOOLEAN'},
+    'thumbnail_path': {'mssql': 'NVARCHAR(255)', 'default': 'VARCHAR(255)'},
 }
 
 # sme_assignments started out without seen_by_sme (added once the SME
@@ -146,10 +156,8 @@ NEW_LINE_KML_ATTRS_COLUMNS = {
     'visible_kml_attrs': {'mssql': 'NVARCHAR(MAX)', 'default': 'TEXT'},
 }
 
-# projects.inspection_types — which inspection type(s) (RGB/Thermal) a
-# project actually does, added after projects already existed.
-NEW_PROJECT_COLUMNS = {
-    'inspection_types': {'mssql': 'NVARCHAR(MAX)', 'default': 'TEXT'},
+NEW_CORRIDOR_PHOTO_COLUMNS = {
+    'thumbnail_path': {'mssql': 'NVARCHAR(255)', 'default': 'VARCHAR(255)'},
 }
 
 # Kept for backwards compatibility with any code importing the old name.
@@ -207,8 +215,8 @@ def ensure_defect_columns(app, verbose=True):
     """Idempotently add any missing columns to chimney_defects AND
     chimney_projects, and create any brand-new tables that this version of
     the app needs (e.g. help_tickets, chimney_project_access) but that
-    don't exist on an existing database yet. Called automatically every
-    time the Flask app starts (see app.py)."""
+    don't exist on an existing database yet. Deprecated: use
+    `flask --app app db upgrade` for current deployments."""
     from models import db
 
     def log(msg):
@@ -242,7 +250,7 @@ def ensure_defect_columns(app, verbose=True):
     ok16 = _ensure_columns(app, 'tower_photos', NEW_TOWER_PHOTO_COLUMNS, verbose)
     ok17 = _ensure_columns(app, 'sme_assignments', NEW_SME_ASSIGNMENT_COLUMNS, verbose)
     ok18 = _ensure_columns(app, 'lines', NEW_LINE_KML_ATTRS_COLUMNS, verbose)
-    ok19 = _ensure_columns(app, 'projects', NEW_PROJECT_COLUMNS, verbose)
+    ok19 = _ensure_columns(app, 'corridor_photos', NEW_CORRIDOR_PHOTO_COLUMNS, verbose)
     return (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
             and ok10 and ok11 and ok12 and ok13 and ok14 and ok15 and ok16 and ok17 and ok18 and ok19)
 
@@ -289,10 +297,12 @@ def _backfill_thermal_points(app, verbose=True):
 
 
 def _backfill_tower_defect_status(app, verbose=True):
-    """Existing tower_defects rows created before `status` existed get NULL
-    there once the column is added — every one of those was, at the time,
-    an open finding (there was no way to close one yet), so backfill to
-    'Open' explicitly. Idempotent — a no-op once done."""
+    """Backfill the defect workflow state without corrupting component state.
+
+    `status` means the component condition (OK/Missing), while
+    `resolution_status` means Open/Closed. Older versions accidentally wrote
+    Open into `status`; repair those rows while filling the correct column.
+    """
     from models import db
 
     def log(msg):
@@ -306,18 +316,23 @@ def _backfill_tower_defect_status(app, verbose=True):
             if 'tower_defects' not in inspector.get_table_names():
                 return True
             cols = {c['name'] for c in inspector.get_columns('tower_defects')}
-            if 'status' not in cols:
+            if 'resolution_status' not in cols:
                 return True
             with engine.begin() as conn:
                 result = conn.execute(text(
-                    "UPDATE tower_defects SET status = 'Open' "
-                    "WHERE status IS NULL OR status = ''"
+                    "UPDATE tower_defects SET resolution_status = 'Open' "
+                    "WHERE resolution_status IS NULL OR resolution_status = ''"
                 ))
                 if result.rowcount:
-                    log(f"Backfilled status='Open' on {result.rowcount} existing tower defect(s).")
+                    log(f"Backfilled resolution_status='Open' on {result.rowcount} existing tower defect(s).")
+                repaired = conn.execute(text(
+                    "UPDATE tower_defects SET status = 'OK' WHERE status = 'Open'"
+                ))
+                if repaired.rowcount:
+                    log(f"Repaired component status on {repaired.rowcount} tower defect(s).")
             return True
     except Exception as e:
-        log(f"WARNING — could not backfill tower_defects.status: {e}")
+        log(f"WARNING — could not backfill tower defect workflow status: {e}")
         return False
 
 

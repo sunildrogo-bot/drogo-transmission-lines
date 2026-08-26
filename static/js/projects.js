@@ -99,7 +99,7 @@ function deleteProjectCard(event, id, name) {
 function projectCardHtml(p) {
   const banner = p.legacy_banner || DEFAULT_COVER_IMAGE;
   const href = p.legacy_route ? `/${p.legacy_route}` :
-    ((window.CURRENT_MODULE === 'Transmission Line' || window.CURRENT_MODULE === 'TRANS') ? `/projects/${p.id}/map` : `/projects/${p.id}/info`);
+    ((window.CURRENT_MODULE === 'Transmission Line' || window.CURRENT_MODULE === 'TRANS') ? `/projects/${p.id}/divisions` : `/projects/${p.id}/info`);
   const lineBadge = p.legacy_route
     ? ''
     : `<span class="card-lines-badge">${p.division_count} division(s) · ${p.line_count} line(s)</span>`;

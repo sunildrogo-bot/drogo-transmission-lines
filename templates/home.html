@@ -173,7 +173,7 @@
       <a href="#thermal">Thermal</a>
       <a href="#roles">Platform</a>
       {% if session.get('user_id') %}
-      <a href="{{ url_for('logout') }}" class="cta">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}" style="display:inline;"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="cta" style="background:transparent;cursor:pointer;font:inherit;">Logout</button></form>
       {% else %}
       <a href="{{ url_for('login') }}" class="cta">Login</a>
       {% endif %}

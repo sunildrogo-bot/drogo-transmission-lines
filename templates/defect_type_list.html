@@ -24,6 +24,17 @@
   .dtl-sev-tag.sev-Critical{background:rgba(201,75,66,.12);color:var(--danger);}
   .dtl-sev-tag.sev-Major{background:rgba(224,165,58,.15);color:#a06a1a;}
   .dtl-sev-tag.sev-Minor{background:rgba(31,157,104,.12);color:var(--success);}
+  .dtl-td-resolution{white-space:nowrap;}
+  .dtl-resolve-link{margin-left:8px;font-size:11px;font-weight:700;color:var(--accent);text-decoration:none;cursor:pointer;}
+  .dtl-resolve-link:hover{text-decoration:underline;}
+  .dtl-modal-overlay{position:fixed;inset:0;background:rgba(6,8,12,.55);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px;}
+  .dtl-modal-box{background:#fff;border-radius:14px;padding:22px 24px;max-width:360px;width:100%;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+  .dtl-modal-msg{font-size:14px;color:var(--text-primary);margin-bottom:14px;font-weight:600;}
+  .dtl-comment-textarea{width:100%;padding:10px 12px;margin-bottom:16px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;resize:vertical;outline:none;}
+  .dtl-comment-textarea:focus{border-color:var(--accent);}
+  .dtl-modal-actions{display:flex;justify-content:flex-end;gap:10px;}
+  .dtl-modal-cancel{padding:9px 16px;border-radius:8px;border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;cursor:pointer;}
+  .dtl-modal-ok{padding:9px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;}
   .dtl-empty{padding:60px;text-align:center;color:var(--text-muted);font-size:13px;}
 
   .dtl-img-lightbox{display:none;position:fixed;inset:0;background:rgba(6,8,12,.9);z-index:2000;align-items:center;justify-content:center;}
@@ -43,7 +54,7 @@
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
     <div class="nav-actions">
       <div class="nav-user">{{ project.module }} <span>/ {{ project.name }}</span></div>
-      <a href="{{ url_for('projects_bp.project_map', project_id=project.id) }}" class="btn-ghost">← Map</a>
+      <a href="{{ url_for('projects_bp.project_divisions', project_id=project.id) }}" class="btn-ghost">← Divisions</a>
     </div>
   </nav>
 
@@ -62,18 +73,24 @@
       <table class="dtl-table">
         <thead>
           <tr>
-            <th style="width:52px;">Image</th><th>Component</th><th>Tower</th><th>Position</th><th>Severity</th><th>Status</th><th>Marked</th>
+            <th style="width:52px;">Image</th><th>Component</th><th>Tower</th><th>Position</th><th>Severity</th><th>Status</th><th>Resolution</th><th>Marked</th>
           </tr>
         </thead>
         <tbody>
           {% for d in defects %}
-          <tr>
-            <td class="dtl-td-img">{% if d.image_url %}<img src="{{ d.image_url }}" alt="" data-shape-type="{{ d.shape_type or '' }}" data-shape-coords='{{ d.shape_coords | tojson }}' onclick="openDtlLightbox(this)"/>{% else %}—{% endif %}</td>
+          <tr id="dtl-row-{{ d.id }}">
+            <td class="dtl-td-img">{% if d.image_url %}<img src="{{ d.thumbnail_url or d.image_url }}" alt="" loading="lazy" data-full-src="{{ d.image_url }}" data-shape-type="{{ d.shape_type or '' }}" data-shape-coords='{{ d.shape_coords | tojson }}' onclick="openDtlLightbox(this)"/>{% else %}—{% endif %}</td>
             <td class="dtl-td-title">{{ d.component_name or '—' }}</td>
             <td>{{ d.division_name }} · {{ d.line_name }} · Tower {{ d.tower_label }}</td>
             <td>{{ d.location or '—' }}</td>
             <td><span class="dtl-sev-tag sev-{{ d.severity }}">{{ d.severity }}</span></td>
             <td>{{ d.status or '—' }}</td>
+            <td class="dtl-td-resolution">
+              <span class="dtl-sev-tag {{ 'sev-Minor' if d.resolution_status == 'Closed' else 'sev-Major' }}">{{ '✓ Closed' if d.resolution_status == 'Closed' else 'Open' }}</span>
+              {% if session.role in ('Admin', 'Client User') %}
+              <a href="javascript:void(0)" class="dtl-resolve-link" onclick="toggleDtlResolution({{ d.id }}, '{{ 'reopen' if d.resolution_status == 'Closed' else 'close' }}')">{{ 'Reopen' if d.resolution_status == 'Closed' else 'Close' }}</a>
+              {% endif %}
+            </td>
             <td>{{ d.created_at.strftime('%d %b %Y') if d.created_at else '—' }}{% if d.created_by %} · {{ d.created_by }}{% endif %}</td>
           </tr>
           {% endfor %}
@@ -97,8 +114,66 @@
 
 {% block scripts %}
 <script>
+  function promptForDtlComment() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'dtl-modal-overlay';
+      overlay.innerHTML = `
+        <div class="dtl-modal-box">
+          <div class="dtl-modal-msg">What was done to fix this defect?</div>
+          <textarea id="dtl-comment-input" class="dtl-comment-textarea" rows="3" placeholder="Required"></textarea>
+          <div class="dtl-modal-actions">
+            <button type="button" class="dtl-modal-cancel" id="dtl-comment-cancel">Cancel</button>
+            <button type="button" class="dtl-modal-ok" id="dtl-comment-ok">Close Defect</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const input = overlay.querySelector('#dtl-comment-input');
+      const cleanup = (result) => { overlay.remove(); resolve(result); };
+      overlay.querySelector('#dtl-comment-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('#dtl-comment-ok').onclick = () => {
+        const val = input.value.trim();
+        if (!val) { input.focus(); input.style.borderColor = 'var(--danger)'; return; }
+        cleanup(val);
+      };
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(null); });
+      setTimeout(() => input.focus(), 50);
+    });
+  }
+
+  async function toggleDtlResolution(id, action) {
+    let comment = null;
+    if (action === 'close') {
+      comment = await promptForDtlComment();
+      if (!comment) return;
+    }
+    try {
+      const res = await fetch(`/api/tower-defects/${id}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, comment }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Could not update this defect.');
+        return;
+      }
+      const updated = await res.json();
+      const cell = document.querySelector(`#dtl-row-${id} .dtl-td-resolution`);
+      if (!cell) return;
+      const closed = updated.resolution_status === 'Closed';
+      const tooltip = closed ? `Closed by ${updated.resolved_by || ''}. ${updated.resolution_comment || ''}` : '';
+      cell.innerHTML = `
+        <span class="dtl-sev-tag ${closed ? 'sev-Minor' : 'sev-Major'}" title="${tooltip.replace(/"/g, '&quot;')}">${closed ? '✓ Closed' : 'Open'}</span>
+        <a href="javascript:void(0)" class="dtl-resolve-link" onclick="toggleDtlResolution(${id}, '${closed ? 'reopen' : 'close'}')">${closed ? 'Reopen' : 'Close'}</a>
+      `;
+    } catch (e) {
+      alert('Could not update this defect.');
+    }
+  }
+
   function openDtlLightbox(imgEl) {
-    document.getElementById('dtl-img-lightbox-img').src = imgEl.src;
+    document.getElementById('dtl-img-lightbox-img').src = imgEl.dataset.fullSrc || imgEl.src;
     document.getElementById('dtl-img-lightbox').classList.add('open');
 
     const svg = document.getElementById('dtl-img-lightbox-svg');

@@ -42,7 +42,7 @@
     <div class="nav-actions">
       <div class="nav-user">{{ project_name }} <span>/ {{ project_full }}</span></div>
       <a href="{{ url_for('land_survey_dashboard') }}" class="btn-ghost">← Land Survey</a>
-      <a href="{{ url_for('logout') }}" class="btn-logout">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
     </div>
   </nav>
   <div class="cover-banner">

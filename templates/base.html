@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="csrf-token" content="{{ csrf_token() }}"/>
   <title>{% block title %}NOVA+{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -54,7 +55,7 @@
     .btn-secondary:hover{background:var(--bg-elevated-2);border-color:var(--accent);}
     .nav-user{font-size:13px;color:var(--text-secondary);}
     .nav-user span{color:var(--accent-light);font-weight:600;}
-    .btn-logout{font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s;text-decoration:none;display:inline-block;}
+    .btn-logout{font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s;text-decoration:none;display:inline-block;}
     .btn-logout:hover{border-color:var(--danger);color:var(--danger);}
 
     /* Shared form field (used by admin "add user" form) */
@@ -93,7 +94,55 @@
     .ann-ticker-item b{color:var(--text-primary);font-weight:700;}
     .ann-ticker-dot{color:var(--border-strong);}
     @keyframes ann-scroll{from{transform:translateX(0);}to{transform:translateX(-50%);}}
+    .global-notif-btn{position:fixed;right:22px;bottom:76px;z-index:980;width:42px;height:42px;border-radius:50%;border:1px solid var(--border);background:var(--bg-panel);box-shadow:0 5px 18px rgba(0,0,0,.15);cursor:pointer;font-size:18px;}
+    .global-notif-badge{position:absolute;right:-3px;top:-4px;min-width:17px;height:17px;border-radius:10px;background:var(--danger);color:#fff;font-size:9px;font-weight:800;display:none;align-items:center;justify-content:center;padding:0 4px;}
+    .global-notif-badge.show{display:flex;}
+    .notif-row{display:block;padding:11px 12px;border:1px solid var(--border-soft);border-radius:9px;margin-bottom:8px;text-decoration:none;color:inherit;background:var(--bg-elevated-2);}
+    .notif-row.unread{border-left:4px solid var(--accent-sky);background:var(--bg-panel);}
+    .notif-title{font-size:12.5px;font-weight:750;color:var(--text-primary);}
+    .notif-message{font-size:11px;color:var(--text-secondary);margin-top:3px;line-height:1.4;}
+    .notif-time{font-size:9.5px;color:var(--text-muted);margin-top:5px;}
   </style>
+  <script>
+    // Add the per-session CSRF token to every unsafe same-origin fetch/XHR.
+    // Existing page scripts do not each need their own security plumbing.
+    (() => {
+      const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
+      const unsafe = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+      const isSameOrigin = value => {
+        try {
+          const raw = value instanceof Request ? value.url : String(value || '');
+          return new URL(raw, window.location.href).origin === window.location.origin;
+        } catch (_) { return false; }
+      };
+
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, init = {}) => {
+        const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (token && unsafe.has(method) && isSameOrigin(input)) {
+          const headers = new Headers(input instanceof Request ? input.headers : undefined);
+          new Headers(init.headers || {}).forEach((value, key) => headers.set(key, value));
+          headers.set('X-CSRF-Token', token);
+          init = { ...init, headers };
+        }
+        return originalFetch(input, init);
+      };
+
+      const originalOpen = XMLHttpRequest.prototype.open;
+      const originalSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__novaCsrfMethod = String(method || 'GET').toUpperCase();
+        this.__novaCsrfUrl = url;
+        return originalOpen.call(this, method, url, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function(body) {
+        if (token && unsafe.has(this.__novaCsrfMethod) && isSameOrigin(this.__novaCsrfUrl)) {
+          this.setRequestHeader('X-CSRF-Token', token);
+        }
+        return originalSend.call(this, body);
+      };
+    })();
+  </script>
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -134,6 +183,19 @@
 </script>
 {% endif %}
 {% block body %}{% endblock %}
+
+{% if session.user_id %}
+  {% if session.role != 'SME' %}
+  <button class="global-notif-btn" onclick="openGlobalNotifications()" title="Notifications">🔔<span class="global-notif-badge" id="global-notif-badge">0</span></button>
+  {% endif %}
+  <div class="modal-backdrop" id="global-notif-modal">
+    <div class="modal" style="max-width:500px;max-height:75vh;display:flex;flex-direction:column;">
+      <div class="modal-header"><div class="modal-title">Notifications</div><button class="modal-close" onclick="closeGlobalNotifications()">×</button></div>
+      <div id="global-notif-list" style="overflow-y:auto;min-height:80px;"></div>
+      <div class="modal-footer"><button class="btn-ghost" onclick="markAllNotificationsRead()">Mark all read</button><button class="btn-primary" onclick="closeGlobalNotifications()">Close</button></div>
+    </div>
+  </div>
+{% endif %}
 
 <!-- ── Shared delete confirmation modal (password-protected) ── -->
 <div class="modal-backdrop" id="delete-confirm-modal">
@@ -212,6 +274,41 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 {% if session.user_id %}
+<script>
+  let _globalNotifications = [];
+  function _notifEscape(value) { const el=document.createElement('div'); el.textContent=value == null ? '' : String(value); return el.innerHTML; }
+  function _updateNotificationBadge(count) {
+    const badge = document.getElementById('{{ "pd-notif-badge" if session.role == "SME" else "global-notif-badge" }}');
+    if (!badge) return;
+    badge.textContent = count > 99 ? '99+' : count;
+    badge.classList.toggle('show', count > 0);
+  }
+  async function loadGlobalNotifications() {
+    try {
+      const res = await fetch('/api/notifications');
+      const data = await res.json();
+      if (!res.ok) return;
+      _globalNotifications = data.notifications || [];
+      _updateNotificationBadge(data.unread || 0);
+    } catch (_) {}
+  }
+  function renderGlobalNotifications() {
+    const box = document.getElementById('global-notif-list');
+    if (!box) return;
+    box.innerHTML = _globalNotifications.length ? _globalNotifications.map(n => `<a class="notif-row ${n.is_read ? '' : 'unread'}" href="${_notifEscape(n.link_url || 'javascript:void(0)')}">
+      <div class="notif-title">${_notifEscape(n.title)}</div><div class="notif-message">${_notifEscape(n.message)}</div><div class="notif-time">${_notifEscape(n.created_at)}</div></a>`).join('') : '<div style="padding:35px;text-align:center;color:var(--text-muted);font-size:12px;">No notifications yet.</div>';
+  }
+  async function openGlobalNotifications() {
+    await loadGlobalNotifications(); renderGlobalNotifications();
+    document.getElementById('global-notif-modal').classList.add('open');
+  }
+  function closeGlobalNotifications() { document.getElementById('global-notif-modal').classList.remove('open'); }
+  async function markAllNotificationsRead() {
+    await fetch('/api/notifications/read', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    _globalNotifications.forEach(n => n.is_read = true); _updateNotificationBadge(0); renderGlobalNotifications();
+  }
+  document.addEventListener('DOMContentLoaded', loadGlobalNotifications);
+</script>
 <!-- ── AI Assistant — floating chat widget, bottom-right, every page ── -->
 <style>
   #ai-chat-toggle {

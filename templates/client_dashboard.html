@@ -3,9 +3,9 @@
 
 {% block head %}
 <style>
-  .cd-page{min-height:100vh;display:flex;flex-direction:column;background:var(--bg-base);}
+  .cd-page{height:100vh;overflow:hidden;display:flex;flex-direction:column;background:var(--bg-base);}
   .cd-wrap{display:flex;flex:1;min-height:0;}
-  .cd-sidebar{width:240px;flex-shrink:0;background:var(--bg-panel);border-right:1px solid var(--border-soft);padding:22px 0;display:flex;flex-direction:column;}
+  .cd-sidebar{width:240px;flex-shrink:0;background:var(--bg-panel);border-right:1px solid var(--border-soft);padding:22px 0;display:flex;flex-direction:column;overflow-y:auto;}
   .cd-sb-title{font-size:10px;letter-spacing:.25em;color:var(--text-muted);text-transform:uppercase;padding:0 22px 16px;font-weight:700;}
   .cd-sb-item{display:flex;align-items:center;gap:11px;padding:11px 22px;font-size:13.5px;font-weight:500;color:var(--text-secondary);cursor:pointer;transition:background .15s,color .15s;border-left:3px solid transparent;margin:2px 0;}
   .cd-sb-item:hover{background:rgba(27,30,36,.05);color:var(--text-primary);}
@@ -19,7 +19,7 @@
   .cd-content{flex:1;min-width:0;padding:34px 40px;overflow-y:auto;}
   .cd-view{display:none;}
   .cd-view.active{display:block;}
-  .cd-title{font-size:22px;font-weight:800;color:var(--text-primary);letter-spacing:.01em;}
+  .cd-title{font-size:22px;font-weight:700;color:var(--text-primary);letter-spacing:-.015em;}
   .cd-sub{font-size:13px;color:var(--text-muted);margin-top:5px;margin-bottom:30px;}
 
   /* Module cards — same look as admin module grid */
@@ -38,6 +38,133 @@
 
   .cd-empty{padding:60px 0;text-align:center;color:var(--text-muted);}
 
+  /* Client Dashboard — project tabs, header card, multi-card grid, charts */
+  .cd-proj-tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;}
+  .cd-proj-tab{font-size:12.5px;font-weight:700;padding:8px 16px;border-radius:20px;border:1px solid var(--border-strong);color:var(--text-secondary);cursor:pointer;background:var(--bg-elevated);}
+  .cd-proj-tab.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .cd-proj-panel{display:none;}
+  .cd-proj-panel.active{display:block;}
+
+  .cd-proj-header-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;background:#fff;border:1px solid rgba(20,24,30,.08);border-radius:12px;padding:20px 24px;margin-bottom:16px;box-shadow:0 1px 2px rgba(20,24,30,.03);}
+  .cd-pc-name{font-size:19px;font-weight:700;color:var(--text-primary);letter-spacing:-.01em;}
+  .cd-pc-sub{font-size:12px;color:var(--text-muted);margin-top:2px;}
+  .cd-pc-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .cd-pc-btn{font-size:12px;font-weight:600;padding:8px 14px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);text-decoration:none;transition:border-color .15s,color .15s;}
+  .cd-pc-btn:hover{border-color:var(--accent);color:var(--accent);}
+
+  /* Hero metrics strip — big Stripe-style numbers with thin dividers,
+     no card box around them, so the numbers that matter most read
+     immediately instead of competing with a dozen equally-weighted tiles. */
+  .cd-hero-metrics{display:flex;align-items:center;background:#fff;border:1px solid rgba(20,24,30,.08);border-radius:12px;padding:22px 28px;margin-bottom:16px;box-shadow:0 1px 2px rgba(20,24,30,.03);overflow-x:auto;}
+  .cd-hero-metric{display:flex;flex-direction:column;gap:4px;flex-shrink:0;padding-right:28px;}
+  .cd-hero-metric.accent .cd-hero-n{color:#0A8E75;}
+  .cd-hero-n{font-size:32px;font-weight:800;color:var(--text-primary);letter-spacing:-.03em;line-height:1;}
+  .cd-hero-l{font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
+  .cd-hero-divider{width:1px;align-self:stretch;background:rgba(20,24,30,.08);margin:0 24px 0 0;flex-shrink:0;}
+  @media(max-width:900px){.cd-hero-metrics{flex-wrap:wrap;gap:16px 0;}.cd-hero-divider{display:none;}.cd-hero-metric{padding-right:20px;}}
+
+  .cd-card-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;}
+  .cd-card{background:#fff;border:1px solid rgba(20,24,30,.08);border-radius:12px;padding:22px 24px;box-shadow:0 1px 2px rgba(20,24,30,.03);transition:border-color .15s ease;}
+  .cd-card:hover{border-color:rgba(20,24,30,.15);}
+  .cd-card-title{font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:3px;letter-spacing:-.005em;}
+  .cd-sub-mini{font-size:11px;color:var(--text-muted);margin-bottom:16px;}
+  @media(max-width:900px){.cd-card-grid{grid-template-columns:1fr;}}
+
+  /* Two cards get a deliberate tinted background — not decoration, but
+     real status meaning: Needs Attention is urgent, Rectification is
+     the good-news counterpart. Nothing else in the UI carries a second
+     accent — a single chromatic identity stays consistent everywhere
+     color isn't reporting an actual status. */
+  .cd-card-attention{background:linear-gradient(175deg,#fff6f5 0%,#ffffff 55%);border-color:rgba(201,75,66,.14);}
+  .cd-card-resolution{background:linear-gradient(175deg,#f3fbf7 0%,#ffffff 55%);border-color:rgba(31,157,104,.14);}
+
+  .cd-stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:14px;}
+  .cd-stat{display:flex;flex-direction:column;align-items:center;text-align:center;}
+  .cd-stat-n{font-size:26px;font-weight:700;color:var(--text-primary);letter-spacing:-.02em;}
+  .cd-stat-l{font-size:9.5px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+  @media(max-width:520px){.cd-stat-grid{grid-template-columns:repeat(3,1fr);row-gap:14px;}}
+
+  .cd-pie-row{display:flex;align-items:center;justify-content:center;gap:22px;flex-wrap:wrap;margin-top:12px;}
+  .cd-pie{position:relative;flex-shrink:0;width:140px;height:140px;border-radius:50%;}
+  .cd-pie-hole{position:absolute;inset:26%;background:var(--bg-base);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  .cd-pie-hole-value{font-size:26px;font-weight:700;color:var(--text-primary);line-height:1;letter-spacing:-.02em;}
+  .cd-pie-hole-label{font-size:9px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-top:3px;}
+  .cd-pie-legend{display:flex;flex-direction:column;gap:6px;}
+  .cd-legend-row{display:flex;align-items:center;gap:9px;font-size:12.5px;}
+  .cd-legend-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+  .cd-legend-count{font-weight:700;color:var(--text-primary);min-width:20px;}
+  .cd-legend-label{color:var(--text-secondary);flex:1;}
+  .cd-legend-pct{color:var(--text-muted);font-size:11px;}
+
+  .cd-bar-chart{display:flex;align-items:flex-end;justify-content:flex-start;gap:20px;height:170px;overflow-x:auto;padding:0 2px;}
+  .cd-bar-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;width:66px;flex-shrink:0;text-decoration:none;color:inherit;cursor:pointer;}
+  .cd-bar-track{flex:1;width:100%;display:flex;align-items:flex-end;justify-content:center;}
+  .cd-bar-fill{width:38px;border-radius:7px 7px 3px 3px;min-height:6px;background:linear-gradient(180deg,#14b8a6,#0A8E75);box-shadow:0 4px 10px -4px rgba(10,142,117,.4);transition:box-shadow .15s,transform .15s;}
+  .cd-bar-col:hover .cd-bar-fill{box-shadow:0 6px 14px -4px rgba(10,142,117,.55);transform:scaleY(1.01);}
+  .cd-bar-count{font-size:14px;font-weight:700;color:var(--text-primary);margin-top:8px;}
+  .cd-bar-label{font-size:10px;color:var(--text-muted);font-weight:600;margin-top:3px;text-align:center;width:100%;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;}
+  .cd-bar-empty{margin:auto;font-size:12px;color:var(--text-muted);}
+
+  /* Portfolio roll-up strip (only shown with >1 assigned project) */
+  .cd-portfolio-strip{display:flex;gap:0;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg-elevated);margin-bottom:18px;overflow:hidden;}
+  .cd-portfolio-stat{flex:1;text-align:center;padding:16px 10px;border-right:1px solid var(--border-soft);}
+  .cd-portfolio-stat:last-child{border-right:none;}
+  .cd-portfolio-stat.warn .cd-portfolio-n{color:var(--danger);}
+  .cd-portfolio-n{font-size:26px;font-weight:700;color:var(--text-primary);display:block;letter-spacing:-.02em;}
+  .cd-portfolio-l{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;}
+
+  /* Inspection Progress card — 3 real metrics + two progress bars */
+  .cd-insp-row{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:14px 0 16px;}
+  .cd-insp-metric{text-align:center;padding:10px 6px;background:var(--bg-elevated-2);border-radius:var(--radius-sm);}
+  .cd-insp-n{font-size:24px;font-weight:700;color:var(--text-primary);letter-spacing:-.02em;}
+  .cd-insp-l{font-size:9.5px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;}
+  .cd-progress-block{margin-top:12px;}
+  .cd-progress-block:first-of-type{margin-top:0;}
+  .cd-progress-head{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);font-weight:700;margin-bottom:6px;}
+  .cd-progress-track{height:7px;border-radius:10px;background:var(--bg-elevated-2);overflow:hidden;}
+  .cd-progress-fill{height:100%;background:linear-gradient(90deg,#14b8a6,#0A8E75);border-radius:10px;}
+  .cd-progress-fill.done{background:linear-gradient(90deg,#34d399,#1f9d68);}
+
+  .cd-pc-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .cd-pc-btn-primary:hover{opacity:.88;color:#fff;}
+
+  /* Needs Attention list */
+  .cd-attn-list{display:flex;flex-direction:column;gap:2px;margin-top:12px;max-height:280px;overflow-y:auto;padding-right:4px;}
+  .cd-attn-list::-webkit-scrollbar{width:6px;}
+  .cd-attn-list::-webkit-scrollbar-track{background:transparent;}
+  .cd-attn-list::-webkit-scrollbar-thumb{background:rgba(201,75,66,.25);border-radius:10px;}
+  .cd-attn-list::-webkit-scrollbar-thumb:hover{background:rgba(201,75,66,.4);}
+  .cd-attn-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:8px;text-decoration:none;color:inherit;}
+  .cd-attn-row:hover{background:var(--bg-elevated-2);}
+  .cd-attn-dot{width:8px;height:8px;border-radius:50%;background:var(--danger);flex-shrink:0;}
+  .cd-attn-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;}
+  .cd-attn-title{font-size:12.5px;font-weight:700;color:var(--text-primary);}
+  .cd-attn-sub{font-size:10.5px;color:var(--text-muted);}
+  .cd-attn-date{font-size:10.5px;color:var(--text-muted);flex-shrink:0;}
+
+  /* Open Defect Aging bars */
+  .cd-aging-list{display:flex;flex-direction:column;gap:14px;margin-top:16px;}
+  .cd-aging-row{display:flex;align-items:center;gap:10px;}
+  .cd-aging-label{font-size:11.5px;color:var(--text-secondary);width:64px;flex-shrink:0;}
+  .cd-aging-track{flex:1;height:8px;border-radius:10px;background:var(--bg-elevated-2);overflow:hidden;}
+  .cd-aging-fill{height:100%;border-radius:10px;}
+  .cd-aging-fill.fresh{background:var(--success);}
+  .cd-aging-fill.warn{background:#e0a53a;}
+  .cd-aging-fill.stale{background:var(--danger);}
+  .cd-aging-n{font-size:13px;font-weight:700;color:var(--text-primary);width:20px;text-align:right;flex-shrink:0;}
+
+
+
+  /* Division-wise inspection progress table */
+  .cd-div-table{width:100%;border-collapse:collapse;margin-top:12px;}
+  .cd-div-table th{text-align:left;font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--accent);font-weight:700;padding:9px 10px;border-bottom:2px solid var(--accent);background:var(--bg-elevated-2);}
+  .cd-div-table td{padding:9px 10px;border-bottom:1px solid var(--border-soft);font-size:12.5px;color:var(--text-secondary);}
+  .cd-div-table tr:last-child td{border-bottom:none;}
+  .cd-div-table td.cd-div-name{font-weight:700;color:var(--text-primary);}
+
+  .cd-card[data-full]{grid-column:span 2;}
+  @media(max-width:900px){.cd-card[data-full]{grid-column:span 1;}}
+
   /* Settings sub-tabs */
   .cd-subtabs{display:flex;gap:6px;margin-bottom:22px;border-bottom:1px solid var(--border-soft);}
   .cd-subtab{padding:9px 15px;font-size:12.5px;font-weight:600;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;}
@@ -46,7 +173,7 @@
   .cd-subview.active{display:block;}
 
   .settings-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:26px 28px;max-width:560px;}
-  .settings-card-title{font-size:15px;font-weight:800;color:var(--text-primary);margin-bottom:6px;}
+  .settings-card-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:6px;}
   .settings-card-desc{font-size:12.5px;color:var(--text-muted);line-height:1.6;margin-bottom:18px;}
   .acct-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border-soft);font-size:13px;}
   .acct-row:last-child{border-bottom:none;}
@@ -79,9 +206,9 @@
     <div class="nav-actions">
       <div class="nav-user">Welcome, <span>{{ user_name.split()[0] }}</span></div>
       {% if can_switch_admin %}
-      <a href="{{ url_for('switch_to_admin') }}" class="btn-logout" style="background:var(--bg-elevated-2);color:var(--text-primary);">Switch to Admin</a>
+      <form method="POST" action="{{ url_for('switch_to_admin') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout" style="background:var(--bg-elevated-2);color:var(--text-primary);">Switch to Admin</button></form>
       {% endif %}
-      <a href="{{ url_for('logout') }}" class="btn-logout">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
     </div>
   </nav>
 
@@ -102,11 +229,223 @@
 
     <div class="cd-content">
 
-      <!-- Dashboard (nothing here yet) -->
+      <!-- Dashboard: every project this client has actually been given access to, with real stats + charts -->
       <div id="view-dashboard" class="cd-view active">
         <div class="cd-title">My Dashboard</div>
-        <div class="cd-sub">Coming soon.</div>
-        <div class="cd-empty"><p>Nothing to show here yet.</p></div>
+        <div class="cd-sub">Your projects, end to end — the same numbers and charts you'd see inside each one.</div>
+
+        {% if portfolio_summary %}
+        <div class="cd-portfolio-strip">
+          <div class="cd-portfolio-stat"><span class="cd-portfolio-n">{{ portfolio_summary.project_count }}</span><span class="cd-portfolio-l">Projects</span></div>
+          <div class="cd-portfolio-stat"><span class="cd-portfolio-n">{{ portfolio_summary.total_towers }}</span><span class="cd-portfolio-l">Towers</span></div>
+          <div class="cd-portfolio-stat"><span class="cd-portfolio-n">{{ portfolio_summary.total_defects }}</span><span class="cd-portfolio-l">Total Defects</span></div>
+          <div class="cd-portfolio-stat"><span class="cd-portfolio-n">{{ portfolio_summary.total_open }}</span><span class="cd-portfolio-l">Open Defects</span></div>
+          <div class="cd-portfolio-stat{{ ' warn' if portfolio_summary.total_critical_open else '' }}"><span class="cd-portfolio-n">{{ portfolio_summary.total_critical_open }}</span><span class="cd-portfolio-l">Critical &amp; Open</span></div>
+        </div>
+        {% endif %}
+
+        {% if project_cards %}
+          {% if project_cards|length > 1 %}
+          <div class="cd-proj-tabs">
+            {% for p in project_cards %}
+            <div class="cd-proj-tab{{ ' active' if loop.first else '' }}" onclick="cdSelectProject({{ loop.index0 }})">{{ p.name }}</div>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          {% for p in project_cards %}
+          <div class="cd-proj-panel{{ ' active' if loop.first else '' }}" id="cd-proj-panel-{{ loop.index0 }}">
+
+            <div class="cd-proj-header-card">
+              <div>
+                <div class="cd-pc-name">{{ p.name }}</div>
+                <div class="cd-pc-sub">{{ p.module }}{% if p.client_name %} · {{ p.client_name }}{% endif %}</div>
+              </div>
+              <div class="cd-pc-actions">
+                <a href="{{ p.map_url }}" class="cd-pc-btn">Divisions</a>
+                <a href="{{ p.overview_url }}" class="cd-pc-btn">Overview</a>
+                <a href="{{ p.tower_wise_url }}" class="cd-pc-btn">Tower-wise Defects</a>
+                <a href="{{ p.csv_export_url }}" class="cd-pc-btn">⬇ Export CSV</a>
+                <a href="{{ p.report_url }}" target="_blank" class="cd-pc-btn cd-pc-btn-primary">⬇ Project Report</a>
+              </div>
+            </div>
+
+            <div class="cd-hero-metrics">
+              <div class="cd-hero-metric"><span class="cd-hero-n">{{ p.division_count }}</span><span class="cd-hero-l">Divisions</span></div>
+              <div class="cd-hero-divider"></div>
+              <div class="cd-hero-metric"><span class="cd-hero-n">{{ p.line_count }}</span><span class="cd-hero-l">Lines</span></div>
+              <div class="cd-hero-divider"></div>
+              <div class="cd-hero-metric"><span class="cd-hero-n">{{ p.tower_count }}</span><span class="cd-hero-l">Towers in KML</span></div>
+              <div class="cd-hero-divider"></div>
+              <div class="cd-hero-metric"><span class="cd-hero-n">{{ p.total_defects }}</span><span class="cd-hero-l">Total Defects</span></div>
+              <div class="cd-hero-divider"></div>
+              <div class="cd-hero-metric accent"><span class="cd-hero-n">{{ p.inspected_pct }}%</span><span class="cd-hero-l">Inspection Complete</span></div>
+            </div>
+
+            <div class="cd-card-grid">
+              <div class="cd-card cd-card-attention" data-full>
+                <div class="cd-card-title">Needs Attention</div>
+                <div class="cd-sub-mini">Open Critical defects, oldest first</div>
+                {% if p.needs_attention %}
+                <div class="cd-attn-list">
+                  {% for d in p.needs_attention %}
+                  <a href="{{ d.type_url }}" class="cd-attn-row">
+                    <span class="cd-attn-dot"></span>
+                    <span class="cd-attn-main">
+                      <span class="cd-attn-title">{{ d.component_name or d.defect_type or 'Defect' }}</span>
+                      <span class="cd-attn-sub">{{ d.division_name }} · {{ d.line_name }} · Tower {{ d.tower_label }}</span>
+                    </span>
+                    <span class="cd-attn-date">{{ d.created_at.strftime('%d %b') if d.created_at else '' }}</span>
+                  </a>
+                  {% endfor %}
+                </div>
+                {% else %}
+                <div class="cd-bar-empty" style="height:auto;padding:24px 0;">No open Critical defects — nothing urgent outstanding.</div>
+                {% endif %}
+              </div>
+
+              <div class="cd-card cd-card-pie">
+                <div class="cd-card-title">Defects by Severity</div>
+                <div class="cd-pie-row">
+                  <div class="cd-pie" style="background:{{ p.severity_pie_gradient }};">
+                    <div class="cd-pie-hole">
+                      <div class="cd-pie-hole-value">{{ p.total_defects }}</div>
+                      <div class="cd-pie-hole-label">Total</div>
+                    </div>
+                  </div>
+                  <div class="cd-pie-legend">
+                    {% for sev, color in [('Critical','var(--danger)'), ('Major','#e0a53a'), ('Minor','var(--success)')] %}
+                    <div class="cd-legend-row">
+                      <span class="cd-legend-dot" style="background:{{ color }};"></span>
+                      <span class="cd-legend-count">{{ p.severity_counts[sev] }}</span>
+                      <span class="cd-legend-label">{{ sev }}</span>
+                      <span class="cd-legend-pct">{{ ((p.severity_counts[sev] / p.total_defects * 100) | round | int) if p.total_defects else 0 }}%</span>
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-resolution">
+                <div class="cd-card-title">Rectification Progress</div>
+                <div class="cd-sub-mini">Defects closed out after being fixed in the field</div>
+                <div class="cd-pie-row">
+                  <div class="cd-pie" style="background:conic-gradient(var(--success) 0deg {{ (p.resolution_pct * 3.6) | round(2) }}deg, var(--border) {{ (p.resolution_pct * 3.6) | round(2) }}deg 360deg);">
+                    <div class="cd-pie-hole">
+                      <div class="cd-pie-hole-value">{{ p.resolution_pct }}%</div>
+                      <div class="cd-pie-hole-label">Closed</div>
+                    </div>
+                  </div>
+                  <div class="cd-pie-legend">
+                    <div class="cd-legend-row"><span class="cd-legend-dot" style="background:var(--border);"></span><span class="cd-legend-count">{{ p.open_count }}</span><span class="cd-legend-label">Open</span></div>
+                    <div class="cd-legend-row"><span class="cd-legend-dot" style="background:var(--success);"></span><span class="cd-legend-count">{{ p.closed_count }}</span><span class="cd-legend-label">Closed</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-inspection">
+                <div class="cd-card-title">Inspection Progress</div>
+                <div class="cd-sub-mini">Towers in the KML vs. what's actually been covered</div>
+                <div class="cd-progress-block" style="margin-top:16px;">
+                  <div class="cd-progress-head"><span>Photographed</span><span>{{ p.towers_photographed }} / {{ p.tower_count }} towers ({{ p.photographed_pct }}%)</span></div>
+                  <div class="cd-progress-track"><div class="cd-progress-fill" style="width:{{ p.photographed_pct }}%;"></div></div>
+                </div>
+                <div class="cd-progress-block">
+                  <div class="cd-progress-head"><span>Inspection Done</span><span>{{ p.towers_inspected }} / {{ p.tower_count }} towers ({{ p.inspected_pct }}%)</span></div>
+                  <div class="cd-progress-track"><div class="cd-progress-fill done" style="width:{{ p.inspected_pct }}%;"></div></div>
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-aging">
+                <div class="cd-card-title">Open Defect Aging</div>
+                <div class="cd-sub-mini">How long open defects have been sitting, unresolved</div>
+                <div class="cd-aging-list">
+                  <div class="cd-aging-row">
+                    <span class="cd-aging-label">0–7 days</span>
+                    <div class="cd-aging-track"><div class="cd-aging-fill fresh" style="width:{{ (p.aging['0-7'] / p.open_count * 100) if p.open_count else 0 }}%;"></div></div>
+                    <span class="cd-aging-n">{{ p.aging['0-7'] }}</span>
+                  </div>
+                  <div class="cd-aging-row">
+                    <span class="cd-aging-label">8–30 days</span>
+                    <div class="cd-aging-track"><div class="cd-aging-fill warn" style="width:{{ (p.aging['8-30'] / p.open_count * 100) if p.open_count else 0 }}%;"></div></div>
+                    <span class="cd-aging-n">{{ p.aging['8-30'] }}</span>
+                  </div>
+                  <div class="cd-aging-row">
+                    <span class="cd-aging-label">30+ days</span>
+                    <div class="cd-aging-track"><div class="cd-aging-fill stale" style="width:{{ (p.aging['30+'] / p.open_count * 100) if p.open_count else 0 }}%;"></div></div>
+                    <span class="cd-aging-n">{{ p.aging['30+'] }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-bars">
+                <div class="cd-card-title">Defects by Division</div>
+                <div class="cd-sub-mini">Which divisions have the most findings so far</div>
+                <div class="cd-bar-chart">
+                  {% if p.division_bars %}
+                    {% for bar in p.division_bars %}
+                    <div class="cd-bar-col" title="{{ bar.name }}">
+                      <div class="cd-bar-track"><div class="cd-bar-fill" style="height:{{ bar.pct }}%;"></div></div>
+                      <div class="cd-bar-count">{{ bar.count }}</div>
+                      <div class="cd-bar-label">{{ bar.name }}</div>
+                    </div>
+                    {% endfor %}
+                  {% else %}
+                    <div class="cd-bar-empty">No defects marked yet.</div>
+                  {% endif %}
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-bars">
+                <div class="cd-card-title">Defects by Type</div>
+                <div class="cd-sub-mini">Every defect type that's actually been marked, A–Z</div>
+                <div class="cd-bar-chart">
+                  {% if p.defect_type_bars %}
+                    {% for bar in p.defect_type_bars %}
+                    <a class="cd-bar-col" href="{{ url_for('projects_bp.project_defects_by_type', project_id=p.id, defect_type=bar.name) }}" title="{{ bar.name }}">
+                      <div class="cd-bar-track"><div class="cd-bar-fill" style="height:{{ bar.pct }}%;"></div></div>
+                      <div class="cd-bar-count">{{ bar.count }}</div>
+                      <div class="cd-bar-label">{{ bar.name }}</div>
+                    </a>
+                    {% endfor %}
+                  {% else %}
+                    <div class="cd-bar-empty">No defects marked yet.</div>
+                  {% endif %}
+                </div>
+              </div>
+
+              <div class="cd-card cd-card-divtable" data-full>
+                <div class="cd-card-title">Inspection Progress by Division</div>
+                <div class="cd-sub-mini">Where coverage is complete, and where it isn't yet</div>
+                {% if p.division_stats %}
+                <table class="cd-div-table">
+                  <thead>
+                    <tr><th>Division</th><th>Lines</th><th>Towers (KML)</th><th>Photos Uploaded</th><th>Photographed</th><th>Inspection Done</th><th>Defects</th></tr>
+                  </thead>
+                  <tbody>
+                    {% for ds in p.division_stats %}
+                    <tr>
+                      <td class="cd-div-name">{{ ds.name }}</td>
+                      <td>{{ ds.line_count }}</td>
+                      <td>{{ ds.tower_count }}</td>
+                      <td>{{ ds.photos_uploaded }}</td>
+                      <td>{{ ds.towers_photographed }} / {{ ds.tower_count }}</td>
+                      <td>{{ ds.towers_inspected }} / {{ ds.tower_count }}</td>
+                      <td>{{ ds.defect_count }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+                {% else %}
+                <div class="cd-bar-empty" style="height:auto;padding:24px 0;">No divisions added yet.</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+        <div class="cd-empty"><p>No projects have been assigned to your account yet. Please contact your administrator.</p></div>
+        {% endif %}
       </div>
 
       <!-- Module Management -->
@@ -200,6 +539,11 @@
     document.querySelectorAll('.cd-view').forEach(v => v.classList.remove('active'));
     document.getElementById(viewId).classList.add('active');
     if (viewId === 'view-settings') loadMyTickets();
+  }
+
+  function cdSelectProject(index) {
+    document.querySelectorAll('.cd-proj-tab').forEach((t, i) => t.classList.toggle('active', i === index));
+    document.querySelectorAll('.cd-proj-panel').forEach((p, i) => p.classList.toggle('active', i === index));
   }
 
   function cdSettingsSubNav(viewId, el) {

@@ -3,7 +3,7 @@ users.py — All user CRUD backed by SQLAlchemy (SQLite by default).
 The rest of the app (app.py, users_routes.py) keeps the SAME call signatures
 as before — only this file changed.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, Role, Module
 
@@ -127,15 +127,23 @@ def record_login(uid) -> None:
 
 
 def create(data: dict) -> dict:
-    raw_password = data.get('password') or _generate_password()
+    import secrets
+    from security_controls import one_time_token
+
+    setup_token, setup_token_hash = one_time_token()
+    # The account has no emailed/shared password. A strong random placeholder
+    # makes password login impossible until the one-time setup link is used.
+    unreachable_password = secrets.token_urlsafe(48)
 
     user = User(
         username      = data.get('username', '').strip(),
         email         = data.get('email', '').strip().lower(),
-        password_hash = generate_password_hash(raw_password),
+        password_hash = generate_password_hash(unreachable_password),
         contact       = data.get('contact', '').strip(),
         photo_path    = data.get('photo_path', '') or '',
         status        = data.get('status', 'Pending'),
+        reset_token   = setup_token_hash,
+        reset_token_expires = datetime.utcnow() + timedelta(hours=24),
     )
 
     for role_name in (data.get('roles') or ['Client User']):
@@ -150,19 +158,24 @@ def create(data: dict) -> dict:
     db.session.commit()
 
     result = user.to_dict()
-    result['_generated_password'] = raw_password
+    result['_setup_token'] = setup_token
     return result
 
 
 def _apply_project_restrictions(user, data):
-    """Sets which specific projects a user is restricted to, for modules
-    where that's been configured. Leaving a module's project list empty
-    means "full access to every project in that module" — see
-    User.restricted_project_ids_for_module()'s docstring."""
+    """Set the Client projects this account may access.
+
+    An empty selection means no project access. Admin access is global and
+    Pilot/SME access is derived from their explicit line assignments.
+    """
     from models import Project
     if 'project_ids' in data and isinstance(data['project_ids'], list):
         ids = [int(i) for i in data['project_ids'] if str(i).isdigit()]
-        user.allowed_projects = Project.query.filter(Project.id.in_(ids)).all() if ids else []
+        modules = set(data.get('modules') or user.module_names())
+        user.allowed_projects = (
+            Project.query.filter(Project.id.in_(ids), Project.module.in_(modules)).all()
+            if ids and modules else []
+        )
 
 
 def update(uid, data: dict):
@@ -191,6 +204,10 @@ def update(uid, data: dict):
 
     _apply_project_restrictions(user, data)
 
+    # Revoke all sessions issued before this account update. The API refreshes
+    # the editing Admin's own cookie after commit when they edit themselves.
+    user.session_version = int(user.session_version or 1) + 1
+
     db.session.commit()
     return user.to_dict()
 
@@ -199,39 +216,19 @@ def delete(uid) -> bool:
     user = User.query.get(int(uid))
     if not user:
         return False
+
+    from models import Project
+    from storage_cleanup import delete_stored_files
+
+    profile_path = user.photo_path
+    # Works even before/without the FK migration and preserves project rows.
+    Project.query.filter_by(created_by=user.id).update(
+        {Project.created_by: None}, synchronize_session=False
+    )
     db.session.delete(user)
     db.session.commit()
+    cleanup = delete_stored_files([profile_path])
+    if cleanup['errors']:
+        from flask import current_app
+        current_app.logger.warning('User profile file cleanup failed: %s', cleanup['errors'])
     return True
-
-
-def _generate_password(length: int = 7) -> str:
-    """
-    Generates a 7-character system password containing a mix of
-    lowercase, uppercase, and a minimal set of special characters.
-    Guarantees at least one of each category, then fills the rest randomly.
-    Special character set is kept minimal (no quotes/backslashes/spaces)
-    to avoid issues with copy/paste, URLs, or shell/SQL edge cases.
-    """
-    import secrets, string
-    lower   = string.ascii_lowercase
-    upper   = string.ascii_uppercase
-    special = '!@#$%'  # minimal, unambiguous special characters
-
-    # Guarantee at least one char from each required category
-    required = [
-        secrets.choice(lower),
-        secrets.choice(upper),
-        secrets.choice(special),
-    ]
-
-    # Fill the remaining length from the combined pool (letters-heavy)
-    pool = lower + upper + special
-    remaining = [secrets.choice(pool) for _ in range(length - len(required))]
-
-    pwd_chars = required + remaining
-    # Shuffle so the special char / uppercase aren't always in fixed positions
-    for i in range(len(pwd_chars) - 1, 0, -1):
-        j = secrets.randbelow(i + 1)
-        pwd_chars[i], pwd_chars[j] = pwd_chars[j], pwd_chars[i]
-
-    return ''.join(pwd_chars)

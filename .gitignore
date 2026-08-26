@@ -1,22 +1,30 @@
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
 
-# secrets
+# Production secrets and local overrides
 .env
+.env.*
+!.env.example
 
-# local db / uploads
+# Persistent database and user uploads
 instance/
 static/uploads/
 *.db
+*.sqlite
+*.sqlite3
+*.bak
+*.mdf
+*.ldf
 
-# python env
+# Python environments
 venv/
 .venv/
 
-# frontend
+# Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
 
-# OS
+# OS/editor files
 .DS_Store
-
+Thumbs.db

@@ -128,6 +128,8 @@ def api_create():
     errors = _validate(data)
     if errors:
         return jsonify({'error': errors}), 400
+    if user_store.get_by_email(data['email']):
+        return jsonify({'error': 'A user with this email already exists.'}), 409
 
     photo_file = request.files.get('photo')
     if photo_file and photo_file.filename:
@@ -138,22 +140,21 @@ def api_create():
 
     new_user = user_store.create(data)
 
-    # Email the system-generated password to the new user (Gmail SMTP).
-    # This never blocks user creation — if mail isn't configured or the
-    # send fails, we still return 201 but flag _email_sent = False so the
-    # admin UI can fall back to showing the password directly.
-    try:
-        login_url = url_for('login', _external=True)
-    except Exception:
-        login_url = ''
+    # Send a one-time password-setup link instead of transmitting a reusable
+    # temporary password in plaintext. The token is removed from the API
+    # response unless Admin needs a manual fallback because email failed.
+    from security_controls import public_url
+    setup_token = new_user.pop('_setup_token')
+    setup_url = public_url('reset_password', token=setup_token)
 
     email_sent = mailer.send_welcome_email(
         to_email=new_user['email'],
         username=new_user['username'],
-        password=new_user.get('_generated_password', ''),
-        login_url=login_url,
+        setup_url=setup_url,
     )
     new_user['_email_sent'] = email_sent
+    if not email_sent:
+        new_user['_setup_url'] = setup_url
 
     return jsonify(new_user), 201
 
@@ -163,6 +164,16 @@ def api_update(uid):
     guard = _require_admin()
     if guard:
         return guard
+
+    from models import User, db
+    try:
+        user_row = db.session.get(User, int(uid))
+    except (TypeError, ValueError):
+        user_row = None
+    if not user_row:
+        return jsonify({'error': 'Not found'}), 404
+    previous_photo_path = user_row.photo_path
+    replacement_photo_path = ''
 
     data = {
         'username': request.form.get('username', ''),
@@ -183,15 +194,28 @@ def api_update(uid):
         if saved is None:
             return jsonify({'error': 'Profile photo must be a .jpg, .png, or .webp file.'}), 400
         data['photo_path'] = saved
+        replacement_photo_path = saved
 
     updated = user_store.update(uid, data)
     if not updated:
         return jsonify({'error': 'Not found'}), 404
 
+    if replacement_photo_path and previous_photo_path != replacement_photo_path:
+        from storage_cleanup import delete_stored_files
+        cleanup = delete_stored_files([previous_photo_path])
+        if cleanup['errors']:
+            current_app.logger.warning(
+                'Old profile photo cleanup failed for user %s: %s',
+                uid, cleanup['errors'],
+            )
+
     # Keep this admin's own session in sync if they edit their own roles/modules
-    if uid == session.get('user_id'):
+    if str(uid) == str(session.get('user_id')):
+        session['user_name'] = updated['username']
+        session['user_email'] = updated['email']
         session['all_roles'] = updated['roles']
         session['modules']   = updated['modules']
+        session['session_version'] = int(updated.get('session_version') or 1)
         if session.get('role') not in updated['roles']:
             session['role'] = updated['roles'][0] if updated['roles'] else 'Client User'
 
@@ -203,6 +227,8 @@ def api_delete(uid):
     guard = _require_admin()
     if guard:
         return guard
+    if str(uid) == str(session.get('user_id')):
+        return jsonify({'error': 'You cannot delete the account currently signed in.'}), 400
 
     ok = user_store.delete(uid)
     if not ok:

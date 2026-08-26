@@ -25,15 +25,11 @@ user_modules = db.Table(
     db.Column('module_id', db.Integer, db.ForeignKey('modules.id', ondelete='CASCADE'), primary_key=True),
 )
 
-# Project-wise access — an ADDITIONAL, optional restriction layered on top
-# of module-level access. A user still needs their module assigned (via
-# user_modules above) to see a module at all; this table narrows that
-# down further to specific projects within it (the generic Project model
-# used by Transmission Line/TRANS). See
-# User.restricted_project_ids_for_module()/is_admin-bypass logic
-# for how "no rows here" intentionally means "full access to every
-# project in that module" — the backward-compatible default so this
-# doesn't retroactively lock out any existing user the moment it ships.
+# Project-wise access for Client User sessions. A user still needs the
+# corresponding module assigned via user_modules, and only projects selected
+# here are visible. No rows means no project access; Admin bypasses this in the
+# centralized access-control layer, while Pilot/SME visibility comes from line
+# assignments instead of this table.
 user_projects = db.Table(
     'user_projects',
     db.Column('user_id',    db.Integer, db.ForeignKey('users.id',    ondelete='CASCADE'), primary_key=True),
@@ -78,6 +74,15 @@ class User(db.Model):
     last_login_at = db.Column(db.DateTime, nullable=True)         # real timestamp, used to compute effective_status()
     created_at   = db.Column(db.DateTime,    default=datetime.utcnow)
     dashboard_notes = db.Column(db.Text, default='')  # personal scratch notes shown on the admin dashboard
+    # Forgot-password flow: a random token + its expiry, set when a reset
+    # is requested and cleared the moment it's used (or replaced by a
+    # fresh request). Null the rest of the time.
+    reset_token       = db.Column(db.String(64), nullable=True, index=True)
+    reset_token_expires = db.Column(db.DateTime, nullable=True)
+    # Stored in both the database and the signed session cookie. Any
+    # security-sensitive account update increments this value, immediately
+    # invalidating every older session for that account.
+    session_version   = db.Column(db.Integer, nullable=False, default=1, server_default='1')
 
     # How many days since last login before a user is considered inactive
     # again — drives both the Dashboard "Active Users" count and the
@@ -99,7 +104,7 @@ class User(db.Model):
     # Relationships
     roles   = db.relationship('Role',   secondary=user_roles,   backref='users', lazy='joined')
     modules = db.relationship('Module', secondary=user_modules, backref='users', lazy='joined')
-    allowed_projects = db.relationship('Project', secondary=user_projects, backref='allowed_users')
+    allowed_projects = db.relationship('Project', secondary=user_projects, backref='allowed_users', lazy='selectin')
 
     # ── Convenience helpers ───────────────────────────────────────────────────
 
@@ -113,12 +118,12 @@ class User(db.Model):
         return {m.name: m.route for m in self.modules}
 
     def restricted_project_ids_for_module(self, module_name: str):
-        """None means "no restriction — full access to every project in
-        this module" (the backward-compatible default). A set (even an
-        empty one, though that shouldn't normally happen from the UI)
-        means "only these specific project IDs are visible"."""
-        ids = {p.id for p in self.allowed_projects if p.module == module_name}
-        return ids if ids else None
+        """The explicitly assigned project IDs for this module.
+
+        An empty set deliberately means no access. Admin bypass and
+        Pilot/SME line-assignment access are handled in access_control.py.
+        """
+        return {p.id for p in self.allowed_projects if p.module == module_name}
 
     def to_dict(self, include_password: bool = False) -> dict:
         d = {
@@ -132,6 +137,7 @@ class User(db.Model):
             'status':     self.effective_status(),
             'last_login': self.last_login,
             'created_at': self.created_at.strftime('%d %b %Y') if self.created_at else '',
+            'session_version': int(self.session_version or 1),
             'allowed_project_ids':          [p.id for p in self.allowed_projects],
         }
         if include_password:
@@ -255,7 +261,10 @@ class Project(db.Model):
     # Missing/empty is treated as "both" (matches every project created
     # before this existed).
     inspection_types = db.Column(db.Text, default='')
-    created_by  = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    # Project history survives account deletion. The creator reference is
+    # informational only, so deleting that user must set it to NULL rather
+    # than block the whole deletion with a foreign-key error.
+    created_by  = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at  = db.Column(db.DateTime, default=datetime.utcnow)
 
     divisions = db.relationship('Division', backref='project', cascade='all, delete-orphan',
@@ -399,12 +408,16 @@ class CorridorPhoto(db.Model):
     observation = db.Column(db.Text, default='')
     uploaded_by = db.Column(db.String(120), default='')
     created_at  = db.Column(db.DateTime, default=datetime.utcnow)
+    thumbnail_path = db.Column(db.String(255), nullable=True)
+    content_hash = db.Column(db.String(64), nullable=True, index=True)
 
     def to_dict(self):
+        display_thumb = self.thumbnail_path or self.image_path
         return {
             'id':          self.id,
             'line_id':     self.line_id,
             'image_url':   f'/static/{self.image_path}' if self.image_path else '',
+            'thumbnail_url': f'/static/{display_thumb}' if display_thumb else '',
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
             'observation': self.observation or '',
@@ -437,19 +450,136 @@ class TowerPhoto(db.Model):
     # mistake) get caught and rejected instead of creating a duplicate
     # row and a duplicate copy of the file on disk.
     content_hash = db.Column(db.String(64), nullable=True, index=True)
+    # Set once a defect gets marked on this photo — a real second copy of
+    # the file living under .../<tower>/defects/ instead of .../raw/, so
+    # the raw copy can be deleted later without losing what a marked
+    # defect depends on. Empty until that first defect is marked.
+    defect_copy_path = db.Column(db.String(255), nullable=True)
+    # True once the raw/ copy has actually been deleted from disk — at
+    # that point image_url falls back to defect_copy_path if there is
+    # one, or the photo has no viewable image left at all if there isn't
+    # (meaning it never had a defect, so there was nothing to preserve).
+    raw_deleted = db.Column(db.Boolean, default=False)
+    # A small (~480px) JPEG generated right after upload — the grid view
+    # loads this instead of the multi-MB drone original, which is what
+    # was actually making "opening images" feel slow. Empty for photos
+    # uploaded before this existed; to_dict() falls back to the full
+    # image for those rather than showing nothing.
+    thumbnail_path = db.Column(db.String(255), nullable=True)
+    # Explicit clean-image decision. Images with defects/measurements are
+    # completed automatically; this field records the equally valid clean case.
+    review_outcome = db.Column(db.String(30), nullable=False, default='Pending', server_default='Pending')
+    reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    reviewed_by_name = db.Column(db.String(120), default='')
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+
+    def display_image_path(self):
+        """Return the surviving full-quality image used by viewers/reports."""
+        if self.raw_deleted:
+            return self.defect_copy_path or ''
+        return self.image_path or self.defect_copy_path or ''
+
+    def is_thermal_image(self):
+        """Recognise the DJI paired-image naming convention without decoding."""
+        import os
+        import re
+        filename = os.path.basename(self.image_path or self.defect_copy_path or '')
+        stem = os.path.splitext(filename)[0]
+        return bool(re.search(r'_T(_\d+)?$', stem, re.IGNORECASE))
 
     def to_dict(self):
+        # Prefer the raw file; fall back to the defects/ duplicate only
+        # once raw has actually been deleted — this is the one place that
+        # decides which copy on disk a viewer actually gets shown.
+        display_path = self.display_image_path()
+        # No real thumbnail yet (photo predates this feature, or thumbnail
+        # generation failed) — fall back to the full image rather than an
+        # empty grid tile. Not fast for that one photo, but never broken.
+        thumb_path = self.thumbnail_path or display_path
+        thermal = self.is_thermal_image()
+        has_finding = bool(self.thermal_points) if thermal else bool(self.defects)
+        effective_review = ('Measured' if thermal else 'Defect marked') if has_finding else (self.review_outcome or 'Pending')
         return {
             'id':          self.id,
             'line_id':     self.line_id,
             'tower_label': self.tower_label,
-            'image_url':   f'/static/{self.image_path}' if self.image_path else '',
+            'image_url':   f'/static/{display_path}' if display_path else '',
+            'thumbnail_url': f'/static/{thumb_path}' if thumb_path else '',
             'uploaded_by': self.uploaded_by or '',
             'created_at':  self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
             'defect_count': len(self.defects),
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
+            'has_defect_copy': bool(self.defect_copy_path),
+            'raw_deleted': bool(self.raw_deleted),
+            'is_thermal': thermal,
+            'review_status': effective_review,
+            'review_complete': effective_review != 'Pending',
+            'reviewed_by': self.reviewed_by_name or '',
+            'reviewed_at': self.reviewed_at.strftime('%d %b %Y %H:%M') if self.reviewed_at else '',
         }
+
+
+class UploadBatch(db.Model):
+    """Persistent audit record for one Admin complete-line folder upload."""
+    __tablename__ = 'upload_batches'
+
+    id = db.Column(db.Integer, primary_key=True)
+    line_id = db.Column(db.Integer, db.ForeignKey('lines.id', ondelete='CASCADE'), nullable=False, index=True)
+    uploaded_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    uploaded_by_name = db.Column(db.String(120), default='')
+    folder_name = db.Column(db.String(255), default='')
+    status = db.Column(db.String(20), nullable=False, default='Preparing')
+    total_files = db.Column(db.Integer, nullable=False, default=0)
+    matched_files = db.Column(db.Integer, nullable=False, default=0)
+    completed_files = db.Column(db.Integer, nullable=False, default=0)
+    duplicate_files = db.Column(db.Integer, nullable=False, default=0)
+    failed_files = db.Column(db.Integer, nullable=False, default=0)
+    no_gps_files = db.Column(db.Integer, nullable=False, default=0)
+    unmatched_files = db.Column(db.Integer, nullable=False, default=0)
+    cancelled_files = db.Column(db.Integer, nullable=False, default=0)
+    started_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+    line = db.relationship('Line')
+    items = db.relationship('UploadBatchItem', cascade='all, delete-orphan', passive_deletes=True)
+
+    def to_dict(self, include_items=False):
+        data = {
+            'id': self.id, 'line_id': self.line_id,
+            'line_name': self.line.name if self.line else '',
+            'folder_name': self.folder_name or '', 'status': self.status,
+            'total_files': self.total_files, 'matched_files': self.matched_files,
+            'completed_files': self.completed_files, 'duplicate_files': self.duplicate_files,
+            'failed_files': self.failed_files, 'no_gps_files': self.no_gps_files,
+            'unmatched_files': self.unmatched_files, 'cancelled_files': self.cancelled_files,
+            'uploaded_by': self.uploaded_by_name or '',
+            'started_at': self.started_at.strftime('%d %b %Y %H:%M') if self.started_at else '',
+            'finished_at': self.finished_at.strftime('%d %b %Y %H:%M') if self.finished_at else '',
+        }
+        if include_items:
+            data['items'] = [item.to_dict() for item in sorted(self.items, key=lambda row: row.id)]
+        return data
+
+
+class UploadBatchItem(db.Model):
+    """One file outcome inside a bulk upload; no image bytes are duplicated."""
+    __tablename__ = 'upload_batch_items'
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.Integer, db.ForeignKey('upload_batches.id', ondelete='CASCADE'), nullable=False, index=True)
+    filename = db.Column(db.String(500), nullable=False)
+    tower_label = db.Column(db.String(150), default='')
+    status = db.Column(db.String(20), nullable=False)
+    error_message = db.Column(db.Text, default='')
+    file_size = db.Column(db.BigInteger, nullable=False, default=0)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {'id': self.id, 'filename': self.filename, 'tower_label': self.tower_label or '',
+                'status': self.status, 'error': self.error_message or '',
+                'file_size': self.file_size, 'attempts': self.attempts}
 
 
 class SmeAssignment(db.Model):
@@ -475,6 +605,7 @@ class SmeAssignment(db.Model):
         return {
             'id': self.id, 'line_id': self.line_id, 'sme_user_id': self.sme_user_id,
             'sme_name': self.sme.username if self.sme else '',
+            'sme_email': self.sme.email if self.sme else '',
             'assigned_by': self.assigned_by or '',
             'assigned_at': self.assigned_at.strftime('%d %b %Y, %H:%M') if self.assigned_at else '',
             'seen_by_sme': bool(self.seen_by_sme),
@@ -540,7 +671,8 @@ class TowerInspectionStatus(db.Model):
     either be a genuinely good tower or one nobody has finished reviewing
     yet — this flag is how Admin explicitly says "done, this one's
     reviewed" rather than the report generator or the client guessing
-    from defect count alone. Both report generation and client-facing
+    from defect count alone. The assigned SME normally sets it after review
+    (Admin may reopen/correct it). Both report generation and client-facing
     visibility of a tower's photos/defects are gated on this being True.
 
     Also holds the pilot's zone classification (red/yellow/green) for
@@ -607,13 +739,27 @@ class TowerDefect(db.Model):
     defect_type    = db.Column(db.String(100), default='')      # e.g. 'Corrosion', 'Broken Insulator'
     observation    = db.Column(db.String(255), default='')
     severity       = db.Column(db.String(20), default='Minor')  # matches the chimney module's severity vocabulary
-    status         = db.Column(db.String(20), default='Open')   # 'Open' | 'Closed'
+    status         = db.Column(db.String(20), default='OK')     # 'OK' | 'Missing' — the component's own condition
+    # Separate from the condition status above: has this defect actually
+    # been fixed in the field yet? Starts Open on every new defect;
+    # Admin or Client closes it once it's rectified.
+    resolution_status = db.Column(db.String(20), nullable=False, default='Open', server_default='Open')  # 'Open' | 'Closed'
+    resolved_by    = db.Column(db.String(120), default='')
+    resolved_at    = db.Column(db.DateTime, nullable=True)
+    # Required whenever a defect is closed — what was actually done to
+    # fix it in the field, not just a status flip with no explanation.
+    # Cleared if the defect is reopened, since it no longer applies.
+    resolution_comment = db.Column(db.Text, default='')
     comments       = db.Column(db.Text, default='')
     created_by     = db.Column(db.String(120), default='')
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
 
     photo = db.relationship('TowerPhoto', backref=db.backref('defects', cascade='all, delete-orphan',
                                                                order_by='TowerDefect.created_at'))
+    resolution_events = db.relationship(
+        'DefectResolutionEvent', back_populates='defect', cascade='all, delete-orphan',
+        order_by='DefectResolutionEvent.created_at',
+    )
 
     def to_dict(self):
         coords = []
@@ -632,10 +778,47 @@ class TowerDefect(db.Model):
             'defect_type':     self.defect_type or '',
             'observation':     self.observation or '',
             'severity':        self.severity or 'Minor',
-            'status':          self.status or 'Open',
+            'status':          self.status or 'OK',
+            'resolution_status': self.resolution_status or 'Open',
+            'resolved_by':     self.resolved_by or '',
+            'resolved_at':     self.resolved_at.strftime('%d %b %Y %H:%M') if self.resolved_at else '',
+            'resolution_comment': self.resolution_comment or '',
             'comments':        self.comments or '',
             'created_by':      self.created_by or '',
             'created_at':      self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
+            'resolution_history': [event.to_dict() for event in self.resolution_events],
+        }
+
+
+class DefectResolutionEvent(db.Model):
+    """Immutable audit entry for Client/Admin defect closing and reopening."""
+    __tablename__ = 'defect_resolution_events'
+
+    id                  = db.Column(db.Integer, primary_key=True)
+    defect_id           = db.Column(db.Integer, db.ForeignKey('tower_defects.id', ondelete='CASCADE'), nullable=False, index=True)
+    action              = db.Column(db.String(20), nullable=False)  # close | reopen
+    from_status         = db.Column(db.String(20), nullable=False)
+    to_status           = db.Column(db.String(20), nullable=False)
+    comment             = db.Column(db.Text, nullable=False)
+    evidence_image_path = db.Column(db.String(255), default='')
+    changed_by_user_id  = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    changed_by_name     = db.Column(db.String(120), default='')
+    changed_by_role     = db.Column(db.String(40), default='')
+    created_at          = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    defect = db.relationship('TowerDefect', back_populates='resolution_events')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'action': self.action,
+            'from_status': self.from_status,
+            'to_status': self.to_status,
+            'comment': self.comment,
+            'evidence_image_url': f'/static/{self.evidence_image_path}' if self.evidence_image_path else '',
+            'changed_by': self.changed_by_name or '',
+            'changed_by_role': self.changed_by_role or '',
+            'created_at': self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
         }
 
 
@@ -740,6 +923,38 @@ class TowerReport(db.Model):
         }
 
 
+class AiInspectionSummary(db.Model):
+    """Admin-generated, source-backed summary for one inspected tower."""
+    __tablename__ = 'ai_inspection_summaries'
+    __table_args__ = (db.UniqueConstraint('line_id', 'tower_label', name='uq_ai_summary_tower'),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    line_id = db.Column(db.Integer, db.ForeignKey('lines.id', ondelete='CASCADE'), nullable=False, index=True)
+    tower_label = db.Column(db.String(150), nullable=False)
+    findings_json = db.Column(db.Text, nullable=False, default='[]')
+    sources_json = db.Column(db.Text, nullable=False, default='[]')
+    is_shared = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
+    generated_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    generated_by_name = db.Column(db.String(120), default='')
+    generated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self):
+        try:
+            findings = json.loads(self.findings_json or '[]')
+        except (TypeError, ValueError):
+            findings = []
+        try:
+            sources = json.loads(self.sources_json or '[]')
+        except (TypeError, ValueError):
+            sources = []
+        return {
+            'id': self.id, 'line_id': self.line_id, 'tower_label': self.tower_label,
+            'findings': findings, 'sources': sources, 'is_shared': bool(self.is_shared),
+            'generated_by': self.generated_by_name or '',
+            'generated_at': self.generated_at.strftime('%d %b %Y %H:%M') if self.generated_at else '',
+        }
+
+
 class Announcement(db.Model):
     """Admin-posted announcements shown as a bell popup on the home page.
     Replaces the earlier Help-ticket system — this is one-way (Admin ->
@@ -778,11 +993,21 @@ class HelpTicket(db.Model):
     description        = db.Column(db.Text, default='')
     reporter_type      = db.Column(db.String(20), default='Client')  # Client / Pilot / Admin — self-selected at submission
     submitted_by       = db.Column(db.String(120), default='')
+    # Immutable ownership key. submitted_by remains as a display snapshot so
+    # old tickets still show the reporter's name even after an account rename.
+    submitted_by_user_id = db.Column(
+        db.Integer,
+        db.ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
     status             = db.Column(db.String(20), default='Open')    # Open (new) / Checking / Resolved
     created_at         = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at         = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     resolved_by        = db.Column(db.String(120), default='')
     seen_by_reporter   = db.Column(db.Boolean, default=True)   # flips to False whenever Admin updates status, so the raiser gets notified
+
+    reporter = db.relationship('User', foreign_keys=[submitted_by_user_id])
 
     def to_dict(self):
         return {
@@ -791,6 +1016,7 @@ class HelpTicket(db.Model):
             'description': self.description or '',
             'reporter_type': self.reporter_type or 'Client',
             'submitted_by': self.submitted_by or '',
+            'submitted_by_user_id': self.submitted_by_user_id,
             'status': self.status or 'Open',
             'created_at': _fmt_ist(self.created_at, '%d %b %Y %H:%M', suffix=False),
             'updated_at': _fmt_ist(self.updated_at, '%d %b %Y %H:%M', suffix=False),
@@ -826,3 +1052,43 @@ class ContactInquiry(db.Model):
             'status': self.status or 'New',
             'created_at': _fmt_ist(self.created_at, '%d %b %Y %H:%M', suffix=False),
         }
+
+
+class AuthRateLimit(db.Model):
+    """Database-backed authentication throttle shared by all app workers.
+
+    Only a keyed hash of the email/IP is stored, never the raw identifier.
+    One row represents the current failure/request window for one scope.
+    """
+    __tablename__ = 'auth_rate_limits'
+    __table_args__ = (
+        db.UniqueConstraint('scope', 'key_hash', name='uq_auth_rate_limit_scope_key'),
+    )
+
+    id                = db.Column(db.Integer, primary_key=True)
+    scope             = db.Column(db.String(40), nullable=False)
+    key_hash          = db.Column(db.String(64), nullable=False)
+    attempts          = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    window_started_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    blocked_until     = db.Column(db.DateTime, nullable=True)
+    updated_at        = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+
+class UserNotification(db.Model):
+    """Lightweight in-app alert. No uploaded media or external service."""
+    __tablename__ = 'user_notifications'
+
+    id         = db.Column(db.Integer, primary_key=True)
+    user_id    = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    category   = db.Column(db.String(40), nullable=False, default='info')
+    title      = db.Column(db.String(180), nullable=False)
+    message    = db.Column(db.String(500), default='')
+    link_url   = db.Column(db.String(500), default='')
+    is_read    = db.Column(db.Boolean, nullable=False, default=False, server_default='0', index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {'id': self.id, 'category': self.category, 'title': self.title,
+                'message': self.message or '', 'link_url': self.link_url or '',
+                'is_read': bool(self.is_read),
+                'created_at': self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else ''}
