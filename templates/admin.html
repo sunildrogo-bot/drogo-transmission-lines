@@ -124,6 +124,8 @@
   .dash-progress-pct{font-size:10.5px;font-weight:800;color:var(--text-primary);white-space:nowrap;}
   .dash-progress-warn{color:var(--warning);font-weight:800;}
   .dash-progress-good{color:var(--success);font-weight:800;}
+  .dash-quality-link{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:12px;padding:11px 13px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-elevated-2);text-decoration:none;color:var(--text-primary);font-size:11.5px;font-weight:800;}
+  .dash-quality-link span{font-size:10.5px;color:var(--text-muted);font-weight:500;}
 
   .dash-bar-chart{display:flex;align-items:flex-end;justify-content:center;gap:18px;height:160px;padding:0 4px;}
   .dash-bar-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;width:56px;}
@@ -158,6 +160,7 @@
 {% endblock %}
 
 {% block body %}
+{% from "_admin_nav_icons.html" import admin_nav_icon %}
 <div class="admin-page">
   <nav class="navbar">
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
@@ -173,16 +176,19 @@
     <div class="admin-sidebar">
       <div class="admin-sb-title">Navigation</div>
       <a class="admin-sb-item active" onclick="adminNav('view-overview',this)" href="#">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19V13M10 19V9M16 19V5M22 19H2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div> Dashboard
+        <div class="admin-sb-icon">{{ admin_nav_icon('dashboard') }}</div> Dashboard
       </a>
       <a class="admin-sb-item" href="{{ url_for('users.users_page') }}">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.2" stroke="currentColor" stroke-width="1.4"/><path d="M15.3 14.2c2.6.5 4.7 2.7 4.7 5.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div> User Management
+        <div class="admin-sb-icon">{{ admin_nav_icon('users') }}</div> User Management
       </a>
       <a class="admin-sb-item" onclick="adminNav('view-dashboard',this)" href="#">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg></div> Module Management
+        <div class="admin-sb-icon">{{ admin_nav_icon('modules') }}</div> Module Management
+      </a>
+      <a class="admin-sb-item" href="{{ url_for('settings_bp.inspection_quality_page') }}">
+        <div class="admin-sb-icon">{{ admin_nav_icon('quality') }}</div> Inspection Quality
       </a>
       <a class="admin-sb-item" href="{{ url_for('settings_bp.settings_page') }}">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M12 2V5M12 19V22M22 12H19M5 12H2M19.07 4.93L16.95 7.05M7.05 16.95L4.93 19.07M19.07 19.07L16.95 16.95M7.05 7.05L4.93 4.93" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div> Settings
+        <div class="admin-sb-icon">{{ admin_nav_icon('settings') }}</div> Settings
       </a>
     </div>
     <div class="admin-content">
@@ -203,7 +209,7 @@
           <div class="dash-panel-title-row">
             <div>
               <div class="dash-panel-title" style="margin-bottom:2px;">Project Progress</div>
-              <div style="font-size:10.5px;color:var(--text-muted);">Admin upload → SME review → Inspection Done → visible to Client</div>
+              <div style="font-size:10.5px;color:var(--text-muted);">Admin upload → SME inspects images → Inspection Done → visible to Client</div>
             </div>
           </div>
           <div id="dash-project-progress"><div class="dash-empty">Loading…</div></div>
@@ -319,9 +325,9 @@
         </div>
         <div class="add-user-form" id="add-user-form">
           <div class="auf-grid">
-            <div class="field"><label>Full Name</label><input type="text" placeholder="Enter full name"/></div>
-            <div class="field"><label>Phone Number</label><input type="tel" placeholder="Enter phone number"/></div>
-            <div class="field"><label>Email ID</label><input type="email" placeholder="Enter email address"/></div>
+            <div class="field"><label>Full Name</label><input type="text" placeholder="e.g. Ramesh Kumar"/></div>
+            <div class="field"><label>Phone Number</label><input type="tel" placeholder="+91 98765 43210"/></div>
+            <div class="field"><label>Email ID</label><input type="email" placeholder="ramesh@drogodrones.com"/></div>
             <div class="field">
               <label>Module Access</label>
               <select class="module-select">
@@ -345,7 +351,10 @@
               <tr><th>Name</th><th>Phone</th><th>Email</th><th>Module Access</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Users will appear here after they are added.</td></tr>
+              <tr><td>Sunil Kumar</td><td>+91 98765 43210</td><td>sunil@drogodrones.com</td><td><span class="access-chip tline">Transmission Lines</span></td><td><span class="status-chip active">Active</span></td></tr>
+              <tr><td>Ramesh Patel</td><td>+91 91234 56780</td><td>ramesh@drogodrones.com</td><td><span class="access-chip tline">Transmission Lines</span></td><td><span class="status-chip active">Active</span></td></tr>
+              <tr><td>Anjali Sharma</td><td>+91 99887 76655</td><td>anjali@drogodrones.com</td><td><span class="access-chip lsurvey">Land Survey</span></td><td><span class="status-chip pending">Pending</span></td></tr>
+              <tr><td>Vikram Singh</td><td>+91 90909 12121</td><td>vikram@drogodrones.com</td><td><span class="access-chip chimney">Chimney Present</span></td><td><span class="status-chip active">Active</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -450,7 +459,7 @@ function renderProjectProgress(rows) {
       <table class="dash-progress-table">
         <thead><tr>
           <th>Project</th><th>Total Towers</th><th>Not Captured</th><th>Admin Uploaded</th>
-          <th>SME Pending</th><th>Inspection Done / Client Visible</th>
+          <th>Uploaded / Not Done</th><th>Inspection Done / Client Visible</th>
           <th>Open Defects</th><th>Closed Defects</th><th>Progress</th>
         </tr></thead>
         <tbody>${rows.map(p => `
@@ -459,7 +468,7 @@ function renderProjectProgress(rows) {
             <td>${p.total_towers}</td>
             <td class="${p.not_captured ? 'dash-progress-warn' : 'dash-progress-good'}">${p.not_captured}</td>
             <td>${p.admin_uploaded_towers}<div style="font-size:9.5px;color:var(--text-muted);">${p.photos_uploaded} images</div></td>
-            <td class="${p.sme_review_pending ? 'dash-progress-warn' : 'dash-progress-good'}">${p.sme_review_pending}</td>
+            <td class="${p.inspection_not_done_uploaded ? 'dash-progress-warn' : 'dash-progress-good'}">${p.inspection_not_done_uploaded}</td>
             <td class="dash-progress-good">${p.inspection_done}</td>
             <td>${p.open_defects}</td><td>${p.closed_defects}</td>
             <td><span class="dash-progress-bar"><span class="dash-progress-fill" style="width:${Math.max(0, Math.min(100, p.completion_pct))}%"></span></span><span class="dash-progress-pct">${p.completion_pct}%</span></td>
@@ -472,11 +481,8 @@ function renderNeedsAttention(attn) {
   const box = document.getElementById('dash-needs-attention');
   const critical = attn.open_critical_defects || 0;
   const pending = attn.towers_pending_photos || 0;
+  const inspectionPending = attn.inspection_not_done || 0;
 
-  if (!critical && !pending) {
-    box.innerHTML = '<div class="dash-empty">Nothing needs attention right now.</div>';
-    return;
-  }
   box.innerHTML = `
     <div class="dash-attn-row">
       <span class="dash-attn-label">Open Critical defects</span>
@@ -485,7 +491,12 @@ function renderNeedsAttention(attn) {
     <div class="dash-attn-row">
       <span class="dash-attn-label">Towers still pending a photo</span>
       <span class="dash-attn-value ${pending ? 'warn' : 'ok'}">${pending}</span>
-    </div>`;
+    </div>
+    <div class="dash-attn-row">
+      <span class="dash-attn-label">Inspection Not Done</span>
+      <span class="dash-attn-value ${inspectionPending ? 'warn' : 'ok'}">${inspectionPending}</span>
+    </div>
+    <a class="dash-quality-link" href="{{ url_for('settings_bp.inspection_quality_page') }}">Open Inspection Quality <span>Full tower-level details →</span></a>`;
 }
 
 function renderRecentActivity(rows) {

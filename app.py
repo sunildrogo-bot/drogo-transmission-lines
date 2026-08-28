@@ -206,6 +206,9 @@ def create_app(db_url: str | None = None) -> Flask:
     from training_export_routes import training_export_bp
     app.register_blueprint(training_export_bp)
 
+    from backup_routes import backup_bp
+    app.register_blueprint(backup_bp)
+
     # ── Auth decorators ───────────────────────────────────────────────────────
 
     def login_required(view):

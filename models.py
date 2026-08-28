@@ -466,8 +466,10 @@ class TowerPhoto(db.Model):
     # uploaded before this existed; to_dict() falls back to the full
     # image for those rather than showing nothing.
     thumbnail_path = db.Column(db.String(255), nullable=True)
-    # Explicit clean-image decision. Images with defects/measurements are
-    # completed automatically; this field records the equally valid clean case.
+    # Legacy per-image review fields retained for compatibility with existing
+    # databases and audit history. The current workflow does not require a
+    # clean-image decision; SMEs browse images, mark findings when present, and
+    # use TowerInspectionStatus.inspection_done as the release decision.
     review_outcome = db.Column(db.String(30), nullable=False, default='Pending', server_default='Pending')
     reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     reviewed_by_name = db.Column(db.String(120), default='')
@@ -497,17 +499,20 @@ class TowerPhoto(db.Model):
         # empty grid tile. Not fast for that one photo, but never broken.
         thumb_path = self.thumbnail_path or display_path
         thermal = self.is_thermal_image()
-        has_finding = bool(self.thermal_points) if thermal else bool(self.defects)
+        active_defects = [defect for defect in self.defects if not defect.deleted_at]
+        has_finding = bool(self.thermal_points) if thermal else bool(active_defects)
         effective_review = ('Measured' if thermal else 'Defect marked') if has_finding else (self.review_outcome or 'Pending')
         return {
             'id':          self.id,
             'line_id':     self.line_id,
             'tower_label': self.tower_label,
-            'image_url':   f'/static/{display_path}' if display_path else '',
+            # Resolve the real surviving file at request time. This also
+            # supports databases/uploads copied from an older app version.
+            'image_url':   f'/api/tower-photos/{self.id}/image',
             'thumbnail_url': f'/static/{thumb_path}' if thumb_path else '',
             'uploaded_by': self.uploaded_by or '',
             'created_at':  self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
-            'defect_count': len(self.defects),
+            'defect_count': len(active_defects),
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
             'has_defect_copy': bool(self.defect_copy_path),
@@ -667,11 +672,10 @@ class PilotAssignment(db.Model):
 class TowerInspectionStatus(db.Model):
     """Per-tower "Inspection Done" flag — line_id + tower_label together
     identify the tower (same pattern as TowerPhoto, since towers aren't
-    their own database rows). A tower with zero marked defects could
-    either be a genuinely good tower or one nobody has finished reviewing
-    yet — this flag is how Admin explicitly says "done, this one's
-    reviewed" rather than the report generator or the client guessing
-    from defect count alone. The assigned SME normally sets it after review
+    their own database rows). A tower with zero marked defects may be a
+    genuinely good tower. This explicit tower-level flag records that the
+    SME has completed inspection rather than inferring completion from defect
+    count or requiring a separate decision on every clean image. The assigned SME normally sets it after inspection
     (Admin may reopen/correct it). Both report generation and client-facing
     visibility of a tower's photos/defects are gated on this being True.
 
@@ -702,9 +706,11 @@ class TowerInspectionStatus(db.Model):
     pilot_submitted_at = db.Column(db.DateTime, nullable=True)
 
     def to_dict(self):
+        from workflow_status import tower_status
         return {
             'line_id': self.line_id, 'tower_label': self.tower_label,
             'inspection_done': bool(self.inspection_done),
+            'workflow_status': tower_status(inspection_done=bool(self.inspection_done)),
             'marked_by': self.marked_by or '',
             'marked_at': self.marked_at.strftime('%d %b %Y %H:%M') if self.marked_at else '',
             'zone': self.zone or '',
@@ -753,12 +759,21 @@ class TowerDefect(db.Model):
     comments       = db.Column(db.Text, default='')
     created_by     = db.Column(db.String(120), default='')
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
+    version        = db.Column(db.Integer, nullable=False, default=1, server_default='1')
+    deleted_at     = db.Column(db.DateTime, nullable=True)
+    deleted_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    deleted_by_name = db.Column(db.String(120), default='')
+    deletion_reason = db.Column(db.String(255), default='')
 
     photo = db.relationship('TowerPhoto', backref=db.backref('defects', cascade='all, delete-orphan',
                                                                order_by='TowerDefect.created_at'))
     resolution_events = db.relationship(
         'DefectResolutionEvent', back_populates='defect', cascade='all, delete-orphan',
         order_by='DefectResolutionEvent.created_at',
+    )
+    audit_events = db.relationship(
+        'DefectAnnotationEvent', back_populates='defect', cascade='all, delete-orphan',
+        order_by='DefectAnnotationEvent.created_at',
     )
 
     def to_dict(self):
@@ -786,8 +801,106 @@ class TowerDefect(db.Model):
             'comments':        self.comments or '',
             'created_by':      self.created_by or '',
             'created_at':      self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
+            'version':         self.version or 1,
+            'deleted':         bool(self.deleted_at),
+            'deleted_at':      self.deleted_at.strftime('%d %b %Y %H:%M') if self.deleted_at else '',
+            'deleted_by':      self.deleted_by_name or '',
+            'deletion_reason': self.deletion_reason or '',
             'resolution_history': [event.to_dict() for event in self.resolution_events],
+            'annotation_history': [event.to_dict() for event in self.audit_events],
         }
+
+
+class DefectAnnotationEvent(db.Model):
+    """Immutable audit snapshot for create, update, delete and restore actions."""
+    __tablename__ = 'defect_annotation_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    defect_id = db.Column(db.Integer, db.ForeignKey('tower_defects.id', ondelete='CASCADE'), nullable=False, index=True)
+    action = db.Column(db.String(20), nullable=False)
+    before_json = db.Column(db.Text, default='')
+    after_json = db.Column(db.Text, default='')
+    reason = db.Column(db.String(255), default='')
+    changed_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    changed_by_name = db.Column(db.String(120), default='')
+    changed_by_role = db.Column(db.String(40), default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    defect = db.relationship('TowerDefect', back_populates='audit_events')
+
+    def to_dict(self):
+        def decode(value):
+            try:
+                return json.loads(value) if value else None
+            except (TypeError, ValueError):
+                return None
+        return {
+            'id': self.id, 'action': self.action, 'before': decode(self.before_json),
+            'after': decode(self.after_json), 'reason': self.reason or '',
+            'changed_by': self.changed_by_name or '', 'changed_by_role': self.changed_by_role or '',
+            'created_at': self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
+        }
+
+
+class InspectionComponent(db.Model):
+    """Admin-managed component vocabulary used by new TRANS annotations."""
+    __tablename__ = 'inspection_components'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(150), unique=True, nullable=False)
+    description = db.Column(db.String(255), default='')
+    active = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
+    display_order = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    supports_rgb = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
+    supports_thermal = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
+    severity_required = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    defect_types = db.relationship('InspectionDefectType', back_populates='component',
+                                   cascade='all, delete-orphan', order_by='InspectionDefectType.display_order')
+
+    def to_dict(self, include_types=True):
+        data = {'id': self.id, 'name': self.name, 'description': self.description or '',
+                'active': bool(self.active), 'display_order': self.display_order or 0,
+                'supports_rgb': bool(self.supports_rgb), 'supports_thermal': bool(self.supports_thermal),
+                'severity_required': bool(self.severity_required)}
+        if include_types:
+            data['defect_types'] = [row.to_dict() for row in self.defect_types]
+        return data
+
+
+class InspectionDefectType(db.Model):
+    """Canonical defect name plus report/training labels and historical aliases."""
+    __tablename__ = 'inspection_defect_types'
+    __table_args__ = (db.UniqueConstraint('component_id', 'name', name='uq_inspection_component_defect'),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    component_id = db.Column(db.Integer, db.ForeignKey('inspection_components.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = db.Column(db.String(150), nullable=False)
+    report_name = db.Column(db.String(150), default='')
+    training_class = db.Column(db.String(150), default='')
+    aliases_json = db.Column(db.Text, default='[]')
+    severities_json = db.Column(db.Text, default='["Minor","Major","Critical"]')
+    annotation_method = db.Column(db.String(20), nullable=False, default='box', server_default='box')
+    active = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
+    display_order = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+
+    component = db.relationship('InspectionComponent', back_populates='defect_types')
+
+    def to_dict(self):
+        def array(value, fallback):
+            try:
+                parsed = json.loads(value or '')
+                return parsed if isinstance(parsed, list) else fallback
+            except (TypeError, ValueError):
+                return fallback
+        return {'id': self.id, 'component_id': self.component_id, 'name': self.name,
+                'report_name': self.report_name or self.name,
+                'training_class': self.training_class or self.name,
+                'aliases': array(self.aliases_json, []),
+                'severities': array(self.severities_json, ['Minor', 'Major', 'Critical']),
+                'annotation_method': self.annotation_method or 'box', 'active': bool(self.active),
+                'display_order': self.display_order or 0}
 
 
 class DefectResolutionEvent(db.Model):

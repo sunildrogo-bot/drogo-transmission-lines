@@ -16,6 +16,26 @@ def source(name):
 
 
 class SecurityWiringTests(unittest.TestCase):
+    def test_backup_manager_is_admin_only_integrity_checked_and_excludes_secrets(self):
+        app = source('app.py')
+        routes = source('backup_routes.py')
+        script = source('static/js/settings.js')
+        self.assertIn('app.register_blueprint(backup_bp)', app)
+        self.assertIn("session.get('role') != 'Admin'", routes)
+        self.assertIn("compression=zipfile.ZIP_STORED", routes)
+        self.assertIn('allowZip64=True', routes)
+        self.assertIn('source_db.backup(destination_db)', routes)
+        self.assertIn("archive.testzip()", routes)
+        self.assertIn("'secrets_included': False", routes)
+        self.assertIn("'database_sha256': _sha256(snapshot_path)", routes)
+        self.assertIn('and not photo.raw_deleted', routes)
+        self.assertIn('missing_thumbnail_paths = sorted(thumbnails - actual)', routes)
+        self.assertIn("os.path.commonpath", routes)
+        self.assertIn("Automatic database snapshots currently require the local SQLite database", routes)
+        self.assertIn("fetch('/api/settings/data-health')", script)
+        self.assertIn("fetch('/api/settings/backups'", script)
+        self.assertIn('Create Pre-Upgrade Backup', script)
+
     def test_training_dataset_exports_are_admin_only_reproducible_and_private(self):
         app = source('app.py')
         routes = source('training_export_routes.py')
@@ -35,11 +55,17 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn("return send_file(path, as_attachment=True", routes)
         self.assertIn("methods=['DELETE']", routes)
         self.assertIn("dataset_manifest.json", routes)
+        self.assertIn("training_class_map.json", routes)
+        self.assertIn("def _mapped_label(", routes)
+        self.assertIn("@training_export_bp.route('/api/training-datasets/classes'", routes)
+        self.assertIn("class_mapping.json", routes)
         self.assertIn("manifest.csv", routes)
         self.assertIn("data.yaml", routes)
         self.assertIn("f'annotations/instances_{split}.json'", routes)
         self.assertIn('id="ds-preview-btn"', template)
+        self.assertIn('id="ds-class-manager"', template)
         self.assertIn("fetch('/api/training-datasets/preview'", script)
+        self.assertIn("fetch('/api/training-datasets/classes'", script)
         self.assertIn('Training Dataset Export', settings)
 
     def test_settings_control_center_preserves_real_admin_workflows(self):
@@ -235,6 +261,8 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn('self.thumbnail_path or display_path', models)
         self.assertIn('p.thumbnail_url || p.image_url', template)
         self.assertIn("document.getElementById('lightbox-img').src = photo.image_url", template)
+        self.assertIn("typeof photoOrUrl.is_thermal === 'boolean'", template)
+        self.assertIn('photos.filter(p => isThermalPhoto(p)', template)
         self.assertIn('CorridorPhoto.query.filter(', backfill)
 
     def test_admin_progress_dashboard_matches_operational_workflow(self):
@@ -242,10 +270,10 @@ class SecurityWiringTests(unittest.TestCase):
         template = source('templates/admin.html')
         self.assertIn("'project_progress': project_progress", routes)
         self.assertIn("'admin_uploaded_towers': photographed", routes)
-        self.assertIn("'sme_review_pending': review_pending", routes)
+        self.assertIn("'inspection_not_done_uploaded': inspection_not_done_uploaded", routes)
         self.assertIn("'client_visible': inspected", routes)
         self.assertNotIn("admin_approval", routes)
-        self.assertIn('Admin upload → SME review → Inspection Done → visible to Client', template)
+        self.assertIn('Admin upload → SME inspects images → Inspection Done → visible to Client', template)
         self.assertIn('function renderProjectProgress(rows)', template)
         self.assertIn('Inspection Done / Client Visible', template)
 
@@ -296,16 +324,19 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn('Tower-wise image counts', template)
         self.assertIn("revision = '20260825_0006'", migration)
 
-    def test_sme_review_uses_tower_completion_not_per_image_outcomes(self):
+    def test_sme_review_uses_tower_level_completion_without_image_marks(self):
         models = source('models.py')
         routes = source('projects_routes.py')
         template = source('templates/project_map.html')
         migration = source('migrations/versions/20260825_0007_photo_review_progress.py')
         self.assertIn('review_outcome = db.Column', models)
-        self.assertNotIn("'/api/tower-photos/<int:photo_id>/review'", routes)
+        self.assertIn("'/api/tower-photos/<int:photo_id>/review'", routes)
+        self.assertNotIn("Cannot mark Inspection Done:", routes)
+        self.assertNotIn('toggleCurrentPhotoReviewed()', template)
+        self.assertNotIn('Mark Reviewed', template)
         self.assertNotIn("data.get('confirm_pending')", routes)
         self.assertNotIn('Continue pending', template)
-        self.assertNotIn('Reviewed – No defect', template)
+        self.assertIn('Reviewed - No Defect', routes)
         self.assertNotIn('Reviewed – No thermal issue', template)
         self.assertNotIn('tp-photo-review-badge', template[template.index('function photoItemHtml'):])
         self.assertIn('Inspection Done releases the tower directly to Client', source('templates/sme_dashboard.html'))
@@ -375,6 +406,67 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn('openAddLineModal({{ selected_division.id }})', project_map)
         self.assertNotIn('onclick="openAddDivisionModal()">+ Division', project_map)
         self.assertIn("'map_url': url_for('projects_bp.project_divisions'", app)
+
+    def test_approved_navigation_and_state_foundation_is_shared(self):
+        base = source('templates/base.html')
+        project_map = source('templates/project_map.html')
+        self.assertIn('app-breadcrumb', base)
+        self.assertIn('drogo-map-state:', project_map)
+        self.assertIn('goToAdjacentTower(', project_map)
+        self.assertIn('pm-tower-status-filter', project_map)
+
+    def test_annotation_deletion_is_recoverable_and_audited(self):
+        models = source('models.py')
+        routes = source('projects_routes.py')
+        assistant = source('assistant_api.py')
+        migration = source('migrations/versions/20260827_0011_inspection_workflow_foundation.py')
+        self.assertIn('class DefectAnnotationEvent', models)
+        self.assertIn('deleted_at     = db.Column', models)
+        self.assertIn("_annotation_event(defect, 'delete'", routes)
+        self.assertIn("'/api/tower-defects/<int:defect_id>/restore'", routes)
+        self.assertIn('Restore this annotation before changing its resolution.', routes)
+        self.assertGreaterEqual(assistant.count('TowerDefect.deleted_at.is_(None)'), 3)
+        self.assertIn("revision = '20260827_0011'", migration)
+
+    def test_annotation_updates_use_optimistic_versioning(self):
+        routes = source('projects_routes.py')
+        self.assertIn("methods=['PATCH']", routes)
+        self.assertIn('This annotation was changed by another user', routes)
+        self.assertIn('version must be an integer.', routes)
+        self.assertIn('_taxonomy_selection_error(defect.component_name, defect.defect_type)', routes)
+        self.assertIn("_annotation_event(defect, 'update'", routes)
+
+    def test_seed_script_does_not_embed_demo_credentials(self):
+        seed = source('seed_db.py')
+        self.assertNotIn("'password':", seed)
+        self.assertNotIn('Demo credentials', seed)
+        self.assertNotIn('admin123', seed)
+
+    def test_legacy_photo_rows_are_counted_until_explicitly_deleted(self):
+        routes = source('projects_routes.py')
+        self.assertIn('TowerPhoto.raw_deleted.is_not(True)', routes)
+
+    def test_taxonomy_is_admin_managed_and_applied_to_new_annotations(self):
+        settings = source('settings_routes.py')
+        settings_js = source('static/js/settings.js')
+        project_map = source('templates/project_map.html')
+        self.assertIn("'/api/settings/inspection-taxonomy'", settings)
+        self.assertIn('InspectionComponent.query', settings)
+        self.assertIn('installTaxonomyManager()', settings_js)
+        self.assertIn('loadInspectionTaxonomyOptions()', project_map)
+
+    def test_inspection_done_and_quality_dashboard_are_tower_level(self):
+        routes = source('projects_routes.py')
+        project_map = source('templates/project_map.html')
+        settings = source('settings_routes.py')
+        quality = source('templates/inspection_quality.html')
+        self.assertNotIn('pending_photo_ids', routes)
+        self.assertNotIn('Cannot mark Inspection Done:', routes)
+        self.assertNotIn('Mark Reviewed', project_map)
+        self.assertIn("'/api/inspection-quality'", settings)
+        self.assertIn("'image_review_required': False", settings)
+        self.assertIn('Normal images do not require a separate review mark.', quality)
+        self.assertIn('Inspection Not Done', quality)
 
 
 if __name__ == '__main__':

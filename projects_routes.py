@@ -21,9 +21,9 @@ import csv
 import io
 import numpy as np
 from datetime import datetime, timedelta
-from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app, Response
+from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app, Response, send_file
 from werkzeug.utils import secure_filename
-from models import db, Project, Division, Line, ActivityLog, TowerPhoto, TowerDefect, DefectResolutionEvent, TowerReport, AiInspectionSummary, User, TowerInspectionStatus, PilotAssignment, ThermalPoint, CorridorPhoto, SmeAssignment, PilotLocation, UploadBatch, UploadBatchItem
+from models import db, Project, Division, Line, ActivityLog, TowerPhoto, TowerDefect, DefectResolutionEvent, DefectAnnotationEvent, InspectionComponent, InspectionDefectType, TowerReport, AiInspectionSummary, User, TowerInspectionStatus, PilotAssignment, ThermalPoint, CorridorPhoto, SmeAssignment, PilotLocation, UploadBatch, UploadBatchItem
 from access_control import (
     can_access_division,
     can_access_line,
@@ -771,7 +771,7 @@ def _build_project_defect_summary(project):
     if line_ids:
         defects = (TowerDefect.query
                    .join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
-                   .filter(TowerPhoto.line_id.in_(line_ids))
+                   .filter(TowerPhoto.line_id.in_(line_ids), TowerDefect.deleted_at.is_(None))
                    .order_by(TowerDefect.created_at.desc()).all())
         if released_tower_keys is not None:
             defects = [d for d in defects if (d.photo.line_id, d.photo.tower_label) in released_tower_keys]
@@ -1201,7 +1201,9 @@ def project_info(project_id):
     guard = _project_access_guard(project)
     if guard:
         return guard
-    return render_template('project_info.html', project=project, user_name=session.get('user_name', ''))
+    from users import MODULE_ROUTES
+    return render_template('project_info.html', project=project, user_name=session.get('user_name', ''),
+                           back_endpoint=MODULE_ROUTES.get(project.module, 'projects'))
 
 
 # ── Divisions ──────────────────────────────────────────────────────────────
@@ -1803,6 +1805,37 @@ def api_list_tower_photos(line_id):
     return jsonify({'photos': [p.to_dict() for p in photos]})
 
 
+@projects_bp.route('/api/tower-photos/<int:photo_id>/image', methods=['GET'])
+def api_tower_photo_image(photo_id):
+    """Serve the best surviving viewable copy of a tower photo.
+
+    Older application copies can contain a stale raw-image path while a
+    defect-preservation copy or thumbnail still exists. Resolve that here
+    instead of returning a broken URL to the lightbox.
+    """
+    guard = _login_guard()
+    if guard:
+        return guard
+    photo = TowerPhoto.query.get_or_404(photo_id)
+    if not can_access_photo(photo) or not client_can_access_tower(photo.line_id, photo.tower_label):
+        return jsonify({'error': 'You do not have access to this photo.'}), 403
+
+    static_root = os.path.abspath(current_app.static_folder)
+    candidates = [photo.image_path, photo.defect_copy_path, photo.thumbnail_path]
+    for stored_path in candidates:
+        normalised = (stored_path or '').replace('\\', '/').lstrip('/')
+        if normalised.startswith('static/'):
+            normalised = normalised[len('static/'):]
+        if not normalised:
+            continue
+        absolute_path = os.path.abspath(os.path.join(static_root, *normalised.split('/')))
+        if os.path.commonpath([static_root, absolute_path]) != static_root:
+            continue
+        if os.path.isfile(absolute_path):
+            return send_file(absolute_path, conditional=True, max_age=86400)
+    return jsonify({'error': 'The image file was not found in the copied uploads folder.'}), 404
+
+
 @projects_bp.route('/api/lines/<int:line_id>/tower-photos', methods=['POST'])
 def api_upload_tower_photo(line_id):
     guard = _admin_guard()
@@ -2007,7 +2040,8 @@ def api_tower_defects_flat(line_id):
         return guard
     defects = (TowerDefect.query
                .join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
-               .filter(TowerPhoto.line_id == line_id, TowerPhoto.tower_label == tower_label)
+               .filter(TowerPhoto.line_id == line_id, TowerPhoto.tower_label == tower_label,
+                       TowerDefect.deleted_at.is_(None))
                .order_by(TowerPhoto.id.asc(), TowerDefect.created_at.asc()).all())
     out = []
     for d in defects:
@@ -2164,10 +2198,26 @@ def api_tower_summary(line_id):
     defect_counts = dict(
         db.session.query(TowerPhoto.tower_label, db.func.count(TowerDefect.id))
         .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-        .filter(TowerPhoto.line_id == line_id)
+        .filter(TowerPhoto.line_id == line_id, TowerDefect.deleted_at.is_(None))
         .group_by(TowerPhoto.tower_label)
         .all()
     )
+    open_counts = dict(
+        db.session.query(TowerPhoto.tower_label, db.func.count(TowerDefect.id))
+        .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
+        .filter(TowerPhoto.line_id == line_id, TowerDefect.deleted_at.is_(None), TowerDefect.resolution_status == 'Open')
+        .group_by(TowerPhoto.tower_label).all()
+    )
+    critical_counts = dict(
+        db.session.query(TowerPhoto.tower_label, db.func.count(TowerDefect.id))
+        .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
+        .filter(TowerPhoto.line_id == line_id, TowerDefect.deleted_at.is_(None),
+                TowerDefect.resolution_status == 'Open', TowerDefect.severity == 'Critical')
+        .group_by(TowerPhoto.tower_label).all()
+    )
+    photo_counts = dict(db.session.query(TowerPhoto.tower_label, db.func.count(TowerPhoto.id))
+                        .filter(TowerPhoto.line_id == line_id, TowerPhoto.raw_deleted.is_not(True))
+                        .group_by(TowerPhoto.tower_label).all())
     inspection_rows = TowerInspectionStatus.query.filter_by(line_id=line_id).all()
     inspection_done = {r.tower_label: bool(r.inspection_done) for r in inspection_rows}
 
@@ -2175,7 +2225,9 @@ def api_tower_summary(line_id):
     if session.get('role') == 'Client User':
         labels = {label for label in labels if inspection_done.get(label, False)}
     return jsonify({'towers': {
-        label: {'defect_count': defect_counts.get(label, 0), 'inspection_done': inspection_done.get(label, False)}
+        label: {'defect_count': defect_counts.get(label, 0), 'open_defect_count': open_counts.get(label, 0),
+                'critical_defect_count': critical_counts.get(label, 0), 'photo_count': photo_counts.get(label, 0),
+                'inspection_done': inspection_done.get(label, False)}
         for label in labels
     }})
 
@@ -2244,6 +2296,11 @@ def api_set_inspection_status(line_id, tower_label):
     tower_label = tower_label.strip()
     data = request.get_json(force=True, silent=True) or {}
     done = bool(data.get('inspection_done'))
+    # Inspection is intentionally completed at tower level. The SME browses
+    # every available image, marks only visible findings, and may move past a
+    # normal image without recording a separate per-image review decision.
+    # Consequently there is no image-level review gate here: Inspection Done
+    # is the explicit release decision that makes the tower visible to Client.
     status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
     was_done = bool(status and status.inspection_done)
 
@@ -2266,6 +2323,29 @@ def api_set_inspection_status(line_id, tower_label):
                      'inspection', f'/projects/{project.id}/map?line={line_id}' if project else '')
     db.session.commit()
     return jsonify(status.to_dict())
+
+
+@projects_bp.route('/api/tower-photos/<int:photo_id>/review', methods=['PUT'])
+def api_set_photo_review(photo_id):
+    guard = _inspect_guard_for_photo(photo_id)
+    if guard:
+        return guard
+    photo = TowerPhoto.query.get_or_404(photo_id)
+    data = request.get_json(force=True, silent=True) or {}
+    outcome = (data.get('outcome') or '').strip()
+    if outcome not in {'Pending', 'Reviewed - No Defect'}:
+        return jsonify({'error': 'outcome must be Pending or Reviewed - No Defect.'}), 400
+    photo.review_outcome = outcome
+    if outcome == 'Pending':
+        photo.reviewed_by_user_id = None
+        photo.reviewed_by_name = ''
+        photo.reviewed_at = None
+    else:
+        photo.reviewed_by_user_id = session.get('user_id')
+        photo.reviewed_by_name = session.get('user_name', '')
+        photo.reviewed_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(photo.to_dict())
 
 
 VALID_ZONES = {'red', 'yellow', 'green'}
@@ -2836,6 +2916,45 @@ VALID_SEVERITIES = {'Minor', 'Major', 'Critical'}
 VALID_DEFECT_STATUSES = {'OK', 'Missing'}
 
 
+def _defect_snapshot(defect):
+    return {
+        'shape_type': defect.shape_type, 'shape_coords': json.loads(defect.shape_coords or '[]'),
+        'component_name': defect.component_name or '', 'location': defect.location or '',
+        'defect_type': defect.defect_type or '', 'severity': defect.severity or 'Minor',
+        'status': defect.status or 'OK', 'comments': defect.comments or '',
+        'resolution_status': defect.resolution_status or 'Open', 'version': defect.version or 1,
+    }
+
+
+def _annotation_event(defect, action, before=None, after=None, reason=''):
+    db.session.add(DefectAnnotationEvent(
+        defect=defect, action=action,
+        before_json=json.dumps(before, separators=(',', ':')) if before is not None else '',
+        after_json=json.dumps(after, separators=(',', ':')) if after is not None else '',
+        reason=(reason or '')[:255], changed_by_user_id=session.get('user_id'),
+        changed_by_name=session.get('user_name', ''), changed_by_role=session.get('role', ''),
+    ))
+
+
+def _taxonomy_selection_error(component_name, defect_type):
+    """Validate a selection once an active controlled taxonomy exists."""
+    configured_component = (InspectionComponent.query
+                            .filter(InspectionComponent.active.is_(True),
+                                    db.func.lower(InspectionComponent.name) == component_name.casefold())
+                            .first())
+    if InspectionComponent.query.filter(InspectionComponent.active.is_(True)).first() and not configured_component:
+        return 'Select an active component from the controlled inspection taxonomy.'
+    if configured_component:
+        configured_type = (InspectionDefectType.query
+                           .filter(InspectionDefectType.component_id == configured_component.id,
+                                   InspectionDefectType.active.is_(True),
+                                   db.func.lower(InspectionDefectType.name) == defect_type.casefold())
+                           .first())
+        if not configured_type:
+            return 'The selected defect type is not active for this component.'
+    return ''
+
+
 @projects_bp.route('/api/tower-photos/<int:photo_id>/defects', methods=['GET'])
 def api_list_tower_defects(photo_id):
     guard = _login_guard()
@@ -2848,7 +2967,7 @@ def api_list_tower_defects(photo_id):
     guard = _client_photo_release_guard(photo)
     if guard:
         return guard
-    defects = (TowerDefect.query.filter_by(tower_photo_id=photo_id)
+    defects = (TowerDefect.query.filter_by(tower_photo_id=photo_id, deleted_at=None)
                .order_by(TowerDefect.created_at.asc()).all())
     return jsonify({'defects': [d.to_dict() for d in defects]})
 
@@ -2895,19 +3014,32 @@ def api_create_tower_defect(photo_id):
     # it a short descriptive string instead of validating against a set.
     status = (data.get('status') or 'OK').strip()[:40] or 'OK'
 
+    component_name = (data.get('component_name') or '').strip()
+    defect_type = (data.get('defect_type') or '').strip()
+    if not component_name:
+        return jsonify({'error': 'Select a component before saving the annotation.'}), 400
+    if not defect_type:
+        return jsonify({'error': 'Select a defect type before saving the annotation.'}), 400
+
+    taxonomy_error = _taxonomy_selection_error(component_name, defect_type)
+    if taxonomy_error:
+        return jsonify({'error': taxonomy_error}), 400
+
     defect = TowerDefect(
         tower_photo_id=photo_id,
         shape_type=shape_type,
         shape_coords=json.dumps(clean_coords),
-        component_name=(data.get('component_name') or '').strip(),
+        component_name=component_name,
         location=location,
-        defect_type=(data.get('defect_type') or '').strip(),
+        defect_type=defect_type,
         severity=severity,
         status=status,
         comments=(data.get('comments') or '').strip(),
         created_by=session.get('user_name', ''),
     )
     db.session.add(defect)
+    db.session.flush()
+    _annotation_event(defect, 'create', after=_defect_snapshot(defect))
     if severity == 'Critical':
         line = Line.query.get(photo.line_id)
         project = line.division.project if line and line.division else None
@@ -2939,6 +3071,8 @@ def api_resolve_tower_defect(defect_id):
     guard = _photo_access_guard(defect.tower_photo_id)
     if guard:
         return guard
+    if defect.deleted_at:
+        return jsonify({'error': 'Restore this annotation before changing its resolution.'}), 409
     guard = _client_photo_release_guard(defect.photo)
     if guard:
         return guard
@@ -3011,11 +3145,85 @@ def api_delete_tower_defect(defect_id):
     guard = _inspect_guard_for_photo(defect.tower_photo_id)
     if guard:
         return guard
-    evidence_paths = {event.evidence_image_path for event in defect.resolution_events if event.evidence_image_path}
-    db.session.delete(defect)
+    if defect.deleted_at:
+        return jsonify({'error': 'This annotation is already deleted.'}), 409
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or '').strip()
+    before = _defect_snapshot(defect)
+    defect.deleted_at = datetime.utcnow()
+    defect.deleted_by_user_id = session.get('user_id')
+    defect.deleted_by_name = session.get('user_name', '')
+    defect.deletion_reason = reason[:255]
+    defect.version = (defect.version or 1) + 1
+    _annotation_event(defect, 'delete', before=before, reason=reason)
+    ActivityLog.log(action='delete_annotation', entity_type='TowerDefect',
+                    entity_name=f"{defect.component_name or 'Defect'} — Tower {defect.photo.tower_label}",
+                    performed_by=session.get('user_name', ''), role=session.get('role', ''))
     db.session.commit()
-    _cleanup_deleted_files(evidence_paths, f'tower defect {defect_id}')
     return jsonify({'deleted': defect_id})
+
+
+@projects_bp.route('/api/tower-defects/<int:defect_id>', methods=['PATCH'])
+def api_update_tower_defect(defect_id):
+    defect = TowerDefect.query.get_or_404(defect_id)
+    guard = _inspect_guard_for_photo(defect.tower_photo_id)
+    if guard:
+        return guard
+    if defect.deleted_at:
+        return jsonify({'error': 'Restore this annotation before editing it.'}), 409
+    data = request.get_json(force=True, silent=True) or {}
+    expected_version = data.get('version')
+    if expected_version is not None:
+        try:
+            expected_version = int(expected_version)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'version must be an integer.'}), 400
+        if expected_version != (defect.version or 1):
+            return jsonify({'error': 'This annotation was changed by another user. Reload it before saving.',
+                            'current': defect.to_dict()}), 409
+    before = _defect_snapshot(defect)
+    for field, limit in (('component_name', 150), ('defect_type', 100), ('comments', 2000),
+                         ('observation', 255), ('status', 40), ('location', 20)):
+        if field in data:
+            setattr(defect, field, (data.get(field) or '').strip()[:limit])
+    if 'severity' in data:
+        severity = (data.get('severity') or '').strip()
+        if severity not in VALID_SEVERITIES:
+            return jsonify({'error': 'Severity must be Minor, Major or Critical.'}), 400
+        defect.severity = severity
+    if defect.location and defect.location not in VALID_LOCATIONS:
+        db.session.rollback()
+        return jsonify({'error': 'location must be one of: Top, Middle, Bottom.'}), 400
+    if not defect.component_name or not defect.defect_type:
+        db.session.rollback()
+        return jsonify({'error': 'Component and defect type are required.'}), 400
+    taxonomy_error = _taxonomy_selection_error(defect.component_name, defect.defect_type)
+    if taxonomy_error:
+        db.session.rollback()
+        return jsonify({'error': taxonomy_error}), 400
+    defect.version = (defect.version or 1) + 1
+    after = _defect_snapshot(defect)
+    _annotation_event(defect, 'update', before=before, after=after)
+    db.session.commit()
+    return jsonify(defect.to_dict())
+
+
+@projects_bp.route('/api/tower-defects/<int:defect_id>/restore', methods=['POST'])
+def api_restore_tower_defect(defect_id):
+    guard = _admin_guard()
+    if guard:
+        return guard
+    defect = TowerDefect.query.get_or_404(defect_id)
+    if not defect.deleted_at:
+        return jsonify({'error': 'This annotation is already active.'}), 409
+    defect.deleted_at = None
+    defect.deleted_by_user_id = None
+    defect.deleted_by_name = ''
+    defect.deletion_reason = ''
+    defect.version = (defect.version or 1) + 1
+    _annotation_event(defect, 'restore', after=_defect_snapshot(defect))
+    db.session.commit()
+    return jsonify(defect.to_dict())
 
 
 @projects_bp.route('/api/lines/<int:line_id>/delete-raw-images', methods=['POST'])
@@ -3293,7 +3501,7 @@ def _tower_summary_sources(line_id, tower_label):
     if not photo_ids:
         return []
     sources = []
-    defects = (TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids))
+    defects = (TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids), TowerDefect.deleted_at.is_(None))
                .order_by(TowerDefect.id.asc()).limit(200).all())
     for defect in defects:
         photo = photo_by_id[defect.tower_photo_id]
@@ -3483,7 +3691,7 @@ def api_generate_tower_report(line_id):
     defects = []
     if photo_ids:
         defects = (TowerDefect.query
-                   .filter(TowerDefect.tower_photo_id.in_(photo_ids))
+                   .filter(TowerDefect.tower_photo_id.in_(photo_ids), TowerDefect.deleted_at.is_(None))
                    .order_by(TowerDefect.created_at.asc()).all())
 
     photo_by_id = {p.id: p for p in photos}

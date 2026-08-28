@@ -17,11 +17,16 @@ function settingsNav(viewId, el) {
   if (viewId === 'view-uploads') {
     loadStorageSummary();
     loadAllProjects();
+    loadDataHealth();
+    loadBackupHistory();
   }
+  if (viewId === 'view-inspection') loadInspectionTaxonomy();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('help-tab-badge')) refreshHelpBadge();
+  installTaxonomyManager();
+  installBackupManager();
 
   // Cross-page links (the new-ticket dashboard popup, mainly) land here
   // with ?view=help so Notifications opens automatically.
@@ -35,7 +40,231 @@ document.addEventListener('DOMContentLoaded', () => {
   if (legacyViews[requested]) {
     settingsNav(legacyViews[requested]);
   }
+  if (document.getElementById('view-uploads')?.classList.contains('active')) {
+    loadDataHealth();
+    loadBackupHistory();
+  }
 });
+
+let backupPollTimer = null;
+
+function installBackupManager() {
+  const view = document.getElementById('view-uploads');
+  if (!view || document.getElementById('backup-upgrade-manager')) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'backup-upgrade-manager';
+  wrap.innerHTML = `<div class="section-label">BACKUP &amp; UPGRADE SAFETY</div>
+    <div class="settings-card">
+      <div class="settings-card-title">Data health and recovery</div>
+      <div class="settings-card-desc">Check that database records and stored files agree, then create a recoverable checkpoint before moving to another application version. Secrets from .env are never included.</div>
+      <div class="backup-health-grid" id="backup-health-grid"><div class="backup-message" style="grid-column:1/-1">Run a health check to inspect the current data.</div></div>
+      <div id="backup-health-message"></div>
+      <div class="backup-actions"><button class="btn-ghost" id="data-health-btn" onclick="loadDataHealth(true)">Check Data Health</button>
+        <button class="btn-primary" id="backup-create-btn" onclick="createApplicationBackup(false)">Create Backup</button>
+        <button class="btn-ghost" id="backup-upgrade-btn" onclick="createApplicationBackup(true)">Create Pre-Upgrade Backup</button></div>
+    </div>
+    <div class="section-label">BACKUP HISTORY</div><div id="backup-history" class="backup-list"><div class="backup-message">Loading backup history…</div></div>`;
+  view.appendChild(wrap);
+}
+
+async function loadDataHealth(forceMessage = false) {
+  const grid = document.getElementById('backup-health-grid');
+  const message = document.getElementById('backup-health-message');
+  const btn = document.getElementById('data-health-btn');
+  if (!grid) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const res = await fetch('/api/settings/data-health');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Health check failed.');
+    grid.innerHTML = `<div class="backup-health-stat"><div class="backup-health-label">Status</div><div class="backup-health-value">${escapeHtml(data.status)}</div><div class="backup-health-note">Revision ${escapeHtml(data.database.migration_revision)}</div></div>
+      <div class="backup-health-stat"><div class="backup-health-label">Database</div><div class="backup-health-value">${escapeHtml(data.database.backend)}</div><div class="backup-health-note">${data.records.projects} projects · ${data.records.photos} photos</div></div>
+      <div class="backup-health-stat"><div class="backup-health-label">Stored files</div><div class="backup-health-value">${Number(data.files.upload_count).toLocaleString()}</div><div class="backup-health-note">${escapeHtml(data.files.upload_size)}</div></div>
+      <div class="backup-health-stat"><div class="backup-health-label">Free space</div><div class="backup-health-value">${escapeHtml(data.disk.free)}</div><div class="backup-health-note">${data.files.missing_count} missing · ${data.files.untracked_count} untracked</div></div>`;
+    const notes = [...(data.issues || [])];
+    if (!data.database.snapshot_supported) notes.push('This external database requires its own database-server backup tool.');
+    message.innerHTML = notes.length
+      ? `<div class="backup-message warn">${notes.map(escapeHtml).join('<br>')}</div>`
+      : `<div class="backup-message">Database and tracked uploads are consistent. You can create a backup checkpoint.</div>`;
+  } catch (e) {
+    message.innerHTML = `<div class="backup-message warn">${escapeHtml(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Check Data Health'; }
+  }
+}
+
+async function createApplicationBackup(preUpgrade) {
+  const createBtn = document.getElementById('backup-create-btn');
+  const upgradeBtn = document.getElementById('backup-upgrade-btn');
+  [createBtn, upgradeBtn].forEach(btn => { if (btn) btn.disabled = true; });
+  try {
+    const res = await fetch('/api/settings/backups', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pre_upgrade:preUpgrade})});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not start backup.');
+    await loadBackupHistory();
+  } catch (e) {
+    document.getElementById('backup-health-message').innerHTML = `<div class="backup-message warn">${escapeHtml(e.message)}</div>`;
+  } finally {
+    [createBtn, upgradeBtn].forEach(btn => { if (btn) btn.disabled = false; });
+  }
+}
+
+async function loadBackupHistory() {
+  const box = document.getElementById('backup-history');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/settings/backups');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not load backups.');
+    const rows = data.backups || [];
+    box.innerHTML = rows.length ? rows.map(job => {
+      const terminal = job.status === 'Completed' || job.status === 'Failed';
+      const statusClass = job.status === 'Completed' ? 'completed' : (job.status === 'Failed' ? 'failed' : '');
+      return `<div class="backup-row"><div><div class="backup-row-title">${escapeHtml(job.backup_type || 'Manual')} backup</div><div class="backup-row-sub">${escapeHtml(job.created_at || '')} · ${escapeHtml(job.created_by || 'Admin')}</div></div>
+        <div><span class="backup-status ${statusClass}">${escapeHtml(job.status)}</span>${terminal ? '' : `<div class="backup-progress"><span style="width:${Number(job.progress || 0)}%"></span></div>`}</div>
+        <div><div class="backup-row-title">${escapeHtml(job.file_size_label || '—')}</div><div class="backup-row-sub">${job.summary ? `${Number(job.summary.upload_count || 0).toLocaleString()} uploads · revision ${escapeHtml(job.summary.migration_revision || '—')}` : escapeHtml(job.error || '')}</div></div>
+        <div class="backup-row-actions">${job.status === 'Completed' ? `<a class="btn-ghost" href="/api/settings/backups/${encodeURIComponent(job.id)}/download">Download</a>` : ''}${terminal ? `<button class="btn-ghost" onclick="deleteApplicationBackup('${escapeHtml(job.id)}')">Delete</button>` : ''}</div></div>`;
+    }).join('') : '<div class="backup-message">No backups created yet.</div>';
+    const running = rows.some(job => !['Completed','Failed'].includes(job.status));
+    clearTimeout(backupPollTimer);
+    if (running) backupPollTimer = setTimeout(loadBackupHistory, 2000);
+  } catch (e) {
+    box.innerHTML = `<div class="backup-message warn">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function deleteApplicationBackup(jobId) {
+  try {
+    const res = await fetch(`/api/settings/backups/${encodeURIComponent(jobId)}`, {method:'DELETE'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not delete backup.');
+    loadBackupHistory();
+  } catch (e) {
+    document.getElementById('backup-health-message').innerHTML = `<div class="backup-message warn">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+let taxonomyComponents = [];
+
+function installTaxonomyManager() {
+  const view = document.getElementById('view-inspection');
+  if (!view || document.getElementById('taxonomy-manager')) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'taxonomy-manager';
+  wrap.innerHTML = `<div class="section-label">COMPONENTS &amp; DEFECT TYPES</div>
+    <div class="settings-card"><div class="settings-card-title">Inspection taxonomy</div>
+    <div class="settings-card-desc">Standardize names used by new annotations. Existing inspection records remain unchanged.</div>
+    <div class="taxonomy-toolbar"><input class="modal-select taxonomy-search" id="taxonomy-search" placeholder="Search components or defect types…" oninput="filterTaxonomy(this.value)">
+      <button class="btn-ghost" onclick="setAllTaxonomyOpen(true)">Expand All</button><button class="btn-ghost" onclick="setAllTaxonomyOpen(false)">Collapse All</button></div>
+    <div id="taxonomy-list"><div style="font-size:12px;color:var(--text-muted)">Open this section to load taxonomy.</div></div>
+    <div class="error-msg" id="taxonomy-error" style="display:none;margin-top:12px"></div>
+    <div class="save-msg" id="taxonomy-success">Taxonomy saved.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      <button class="btn-ghost" onclick="addTaxonomyComponent()">Add Component</button>
+      <button class="btn-primary" onclick="saveInspectionTaxonomy()">Save Taxonomy</button>
+    </div></div>`;
+  view.appendChild(wrap);
+}
+
+async function loadInspectionTaxonomy() {
+  const list = document.getElementById('taxonomy-list');
+  if (!list || list.dataset.loaded === '1') return;
+  list.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+  try {
+    const res = await fetch('/api/settings/inspection-taxonomy');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not load taxonomy.');
+    taxonomyComponents = data.components || [];
+    if (!taxonomyComponents.length) {
+      const grouped = {};
+      (data.observed || []).forEach(row => {
+        const component = row.component === 'Unspecified' ? 'General' : row.component;
+        if (!grouped[component]) grouped[component] = [];
+        if (row.defect_type !== 'Unspecified' && !grouped[component].includes(row.defect_type)) grouped[component].push(row.defect_type);
+      });
+      taxonomyComponents = Object.keys(grouped).sort().map(name => ({
+        name, active:true, supports_rgb:true, supports_thermal:false, severity_required:true,
+        defect_types: grouped[name].sort().map(type => ({name:type, report_name:type, training_class:type, aliases:[], severities:['Minor','Major','Critical'], active:true}))
+      }));
+    }
+    list.dataset.loaded = '1';
+    renderTaxonomyManager();
+  } catch (e) {
+    list.innerHTML = `<div class="error-msg">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderTaxonomyManager() {
+  const list = document.getElementById('taxonomy-list');
+  if (!list) return;
+  if (!taxonomyComponents.length) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No components configured. Add the first component.</div>';
+    return;
+  }
+  list.className = 'taxonomy-grid';
+  list.innerHTML = taxonomyComponents.map((component, ci) => `
+    <div class="taxonomy-component" data-taxonomy-index="${ci}" data-taxonomy-search="${escapeHtml(`${component.name || ''} ${(component.defect_types || []).map(type => type.name || '').join(' ')}`.toLowerCase())}">
+      <button type="button" class="taxonomy-component-head" onclick="toggleTaxonomyComponent(${ci})"><span class="taxonomy-chevron">›</span><span class="taxonomy-component-name">${escapeHtml(component.name || 'New component')}</span><span class="taxonomy-count">${(component.defect_types || []).length} defect type${(component.defect_types || []).length === 1 ? '' : 's'}</span></button>
+      <div class="taxonomy-component-body"><div class="taxonomy-component-fields">
+        <div class="field"><label>Component</label><input value="${escapeHtml(component.name || '')}" onchange="taxonomyComponents[${ci}].name=this.value"></div>
+        <label style="font-size:12px;color:var(--text-secondary);padding-bottom:10px"><input type="checkbox" ${component.active !== false ? 'checked' : ''} onchange="taxonomyComponents[${ci}].active=this.checked"> Active</label>
+      </div>
+      <div style="margin:10px 0 6px;font-size:10px;font-weight:700;color:var(--text-muted);letter-spacing:.08em">DEFECT TYPES</div>
+      ${(component.defect_types || []).map((type, ti) => `<div class="taxonomy-defect-row">
+        <input class="modal-select" value="${escapeHtml(type.name || '')}" aria-label="Defect type" onchange="taxonomyComponents[${ci}].defect_types[${ti}].name=this.value">
+        <input class="modal-select" value="${escapeHtml(type.training_class || type.name || '')}" aria-label="Training class" placeholder="Training class" onchange="taxonomyComponents[${ci}].defect_types[${ti}].training_class=this.value">
+        <label style="font-size:11px"><input type="checkbox" ${type.active !== false ? 'checked' : ''} onchange="taxonomyComponents[${ci}].defect_types[${ti}].active=this.checked"> Active</label>
+      </div>`).join('') || '<div class="taxonomy-empty">No defect types configured.</div>'}
+      <button class="btn-ghost" style="margin-top:6px" onclick="addTaxonomyDefect(${ci})">Add Defect Type</button>
+    </div></div>`).join('');
+}
+
+function toggleTaxonomyComponent(componentIndex) {
+  document.querySelector(`.taxonomy-component[data-taxonomy-index="${componentIndex}"]`)?.classList.toggle('open');
+}
+
+function setAllTaxonomyOpen(open) {
+  document.querySelectorAll('.taxonomy-component:not(.hidden)').forEach(card => card.classList.toggle('open', open));
+}
+
+function filterTaxonomy(value) {
+  const query = (value || '').trim().toLowerCase();
+  document.querySelectorAll('.taxonomy-component').forEach(card => {
+    const matches = !query || (card.dataset.taxonomySearch || '').includes(query);
+    card.classList.toggle('hidden', !matches);
+    if (query && matches) card.classList.add('open');
+  });
+}
+
+function addTaxonomyComponent() {
+  taxonomyComponents.push({name:'', active:true, supports_rgb:true, supports_thermal:false, severity_required:true, defect_types:[]});
+  renderTaxonomyManager();
+  toggleTaxonomyComponent(taxonomyComponents.length - 1);
+}
+
+function addTaxonomyDefect(componentIndex) {
+  taxonomyComponents[componentIndex].defect_types.push({name:'', report_name:'', training_class:'', aliases:[], severities:['Minor','Major','Critical'], active:true});
+  renderTaxonomyManager();
+  toggleTaxonomyComponent(componentIndex);
+}
+
+async function saveInspectionTaxonomy() {
+  const error = document.getElementById('taxonomy-error');
+  const success = document.getElementById('taxonomy-success');
+  error.style.display = 'none'; success.style.display = 'none';
+  try {
+    const res = await fetch('/api/settings/inspection-taxonomy', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({components:taxonomyComponents})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not save taxonomy.');
+    success.style.display = 'block';
+    document.getElementById('taxonomy-list').dataset.loaded = '0';
+    await loadInspectionTaxonomy();
+  } catch (e) {
+    error.textContent = e.message; error.style.display = 'block';
+  }
+}
 
 async function loadStorageSummary() {
   const total = document.getElementById('storage-total');

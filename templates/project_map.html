@@ -163,10 +163,8 @@
   }
   .pm-tower-row:last-child{border-bottom:none;}
   .pm-tower-row:hover{background:var(--bg-elevated-2);}
-  /* Non-matching rows dim in place instead of collapsing (display:none) —
-     collapsing shifted every row below it up the list on every keystroke,
-     which read as the tower labels themselves jumping around while typing. */
-  .pm-tower-row.no-match{opacity:.28;pointer-events:none;}
+  /* Filters must show only the requested towers. */
+  .pm-tower-row.no-match{display:none;}
   .pm-tower-row-main{display:flex;align-items:center;gap:7px;min-width:0;flex:1;}
   .pm-tower-row-label{font-weight:700;flex-shrink:0;min-width:34px;}
   .pm-tower-row-status{
@@ -481,6 +479,7 @@
 {% endblock %}
 
 {% block body %}
+{% from "_breadcrumb.html" import breadcrumb %}
 <div class="pm-page">
   <nav class="navbar">
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
@@ -497,6 +496,12 @@
       {% endif %}
     </div>
   </nav>
+  {{ breadcrumb([
+    {'label': project.module, 'url': url_for(back_endpoint)},
+    {'label': project.name, 'url': url_for('projects_bp.project_overview', project_id=project.id)},
+    {'label': selected_division.name, 'url': url_for('projects_bp.project_divisions', project_id=project.id)},
+    {'label': 'Map', 'url': none}
+  ]) }}
   <div class="pm-infobar">
     <div class="pm-stat"><div class="pm-sl">Project</div><div class="pm-sv">{{ project.name }}</div></div>
     {% if project.client_name %}
@@ -544,6 +549,10 @@
               <button class="tower-panel-close" onclick="closeTowerListSidebar()" title="Close">✕</button>
             </div>
             <input id="pm-tower-search-input" class="pm-tower-sidebar-search" placeholder="Find tower…" oninput="filterTowerSidebarList(this.value)" onkeydown="if(event.key==='Enter') goToFirstMatchingTower();"/>
+            <select id="pm-tower-status-filter" class="pm-tower-sidebar-search" onchange="filterTowerSidebarList()" aria-label="Filter towers by status">
+              <option value="all">All Towers</option><option value="pending">Inspection Not Done</option><option value="done">Inspection Done</option><option value="open">Open Defects</option><option value="critical">Critical Defects</option>
+            </select>
+            <div style="display:flex;gap:8px;margin-top:8px"><button class="ctrl-btn" style="flex:1" onclick="goToAdjacentTower(-1)">← Previous</button><button class="ctrl-btn" style="flex:1" onclick="goToAdjacentTower(1)">Next →</button></div>
           </div>
           <div class="pm-tower-sidebar-body" id="pm-tower-sidebar-body"></div>
         </div>
@@ -704,7 +713,7 @@
         <button type="button" class="ldp-close" onclick="cancelDefectForm()" title="Close">✕</button>
       </div>
       <div class="ldp-body">
-        <div class="field"><label>Component Name</label><input id="df-component" placeholder="e.g. Cross Arm"/></div>
+        <div class="field"><label>Component Name</label><input id="df-component" list="inspection-components" placeholder="e.g. Cross Arm" onchange="applyTaxonomyDefectOptions()"/><datalist id="inspection-components"></datalist></div>
         <div class="field">
           <label>Location</label>
           <select id="df-location">
@@ -1009,6 +1018,7 @@ function isLineShowingPhotoDots(key) {
 
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
+  loadInspectionTaxonomyOptions();
   loadDivisions().then(handleDeepLinkedLine).then(handleDeepLinkedDivision);
 });
 
@@ -1100,6 +1110,14 @@ function initMap() {
     attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
     maxZoom: 19
   }).addTo(pmMap);
+  const saved = sessionStorage.getItem(`drogo-map-state:${PROJECT_ID}:${SELECTED_DIVISION_ID}`);
+  if (saved) {
+    try { const state = JSON.parse(saved); if (state.lat != null && state.lng != null && state.zoom != null) pmMap.setView([state.lat, state.lng], state.zoom); } catch (e) { /* ignore stale state */ }
+  }
+  pmMap.on('moveend', () => {
+    const center = pmMap.getCenter();
+    sessionStorage.setItem(`drogo-map-state:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, JSON.stringify({lat:center.lat, lng:center.lng, zoom:pmMap.getZoom(), tower:currentTowerLabel || ''}));
+  });
 }
 
 async function loadDivisions() {
@@ -1868,6 +1886,7 @@ function openTowerPanel(label, props, line, division, lat, lng) {
     currentTowerLabel = label;
     currentTowerLat = lat;
     currentTowerLng = lng;
+    sessionStorage.setItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, label);
 
     const titleEl = document.getElementById('tp-title');
     const rowsEl = document.getElementById('tp-details-rows');
@@ -2539,6 +2558,7 @@ async function loadTowerPhotos() {
       const entries = (defectsData.defects || []).map(d => ({
         id: d.tower_photo_id,
         image_url: d.image_url,
+        is_thermal: false,
         defect_count: 1,
         _focusDefectId: d.id,
         _focusSeverity: d.severity,
@@ -2553,7 +2573,7 @@ async function loadTowerPhotos() {
       (thermalData.points || []).forEach(pt => {
         if (seenThermalPhotos.has(pt.tower_photo_id)) return;
         seenThermalPhotos.add(pt.tower_photo_id);
-        entries.push({ id: pt.tower_photo_id, image_url: pt.image_url, defect_count: 0 });
+        entries.push({ id: pt.tower_photo_id, image_url: pt.image_url, is_thermal: true, defect_count: 0 });
       });
 
       renderTowerPhotos(entries);
@@ -2576,8 +2596,12 @@ let activePhotoTypeTab = PROJECT_INSPECTION_TYPES.includes('rgb') ? 'rgb' : 'the
 // filename-based, no separate database column — the marker survives
 // upload (secure_filename preserves the base name, and even the
 // collision-rename fallback keeps it: "DJI_0123_T_1.JPG" still matches).
-function isThermalPhoto(imageUrl) {
-  const filename = (imageUrl || '').split('/').pop() || '';
+function isThermalPhoto(photoOrUrl) {
+  if (photoOrUrl && typeof photoOrUrl === 'object' && typeof photoOrUrl.is_thermal === 'boolean') {
+    return photoOrUrl.is_thermal;
+  }
+  const imageUrl = typeof photoOrUrl === 'string' ? photoOrUrl : (photoOrUrl?.image_url || '');
+  const filename = imageUrl.split('/').pop() || '';
   const base = filename.replace(/\.[^.]+$/, '');
   return /_T(_\d+)?$/i.test(base);
 }
@@ -2614,7 +2638,7 @@ function photoItemHtml(p, i) {
 function renderTowerPhotos(photos, replaceStored = true) {
   if (replaceStored) currentTowerPhotos = photos;
   const grid = document.getElementById('tp-photo-grid');
-  const filtered = photos.filter(p => isThermalPhoto(p.image_url) === (activePhotoTypeTab === 'thermal'));
+  const filtered = photos.filter(p => isThermalPhoto(p) === (activePhotoTypeTab === 'thermal'));
   currentFilteredPhotos = filtered;
   photoRenderedCount = 0;
   if (!filtered.length) {
@@ -2670,6 +2694,12 @@ function closePhotoLightbox() {
 function renderLightboxImage() {
   const photo = currentFilteredPhotos[currentPhotoIndex];
   if (!photo) { closePhotoLightbox(); return; }
+  const lightboxImg = document.getElementById('lightbox-img');
+  lightboxImg.onerror = () => {
+    if (photo.thumbnail_url && lightboxImg.src !== new URL(photo.thumbnail_url, window.location.origin).href) {
+      lightboxImg.src = photo.thumbnail_url;
+    }
+  };
   document.getElementById('lightbox-img').src = photo.image_url;
   document.getElementById('lightbox-counter').textContent = `${currentPhotoIndex + 1} / ${currentFilteredPhotos.length}`;
   document.getElementById('lightbox-prev').style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
@@ -2681,7 +2711,7 @@ function renderLightboxImage() {
   resetLocalThermalMeasurements();
   currentFocusDefectId = photo._focusDefectId || null;
 
-  const isThermal = isThermalPhoto(photo.image_url);
+  const isThermal = isThermalPhoto(photo);
   const markBtn = document.getElementById('lb-mark-btn');
   const thermalToolbar = document.getElementById('lightbox-thermal-toolbar');
   const thermalShapeTools = document.getElementById('lightbox-thermal-shape-tools');
@@ -2750,10 +2780,35 @@ function lightboxPrev() {
 document.addEventListener('keydown', (e) => {
   const lb = document.getElementById('photo-lightbox');
   if (!lb || !lb.classList.contains('open')) return;
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
   if (e.key === 'Escape') closePhotoLightbox();
   if (e.key === 'ArrowRight') lightboxNext();
   if (e.key === 'ArrowLeft') lightboxPrev();
 });
+
+let inspectionTaxonomy = [];
+async function loadInspectionTaxonomyOptions() {
+  try {
+    const res = await fetch('/api/inspection-taxonomy/active');
+    const data = await res.json();
+    if (!res.ok) return;
+    inspectionTaxonomy = data.components || [];
+    const list = document.getElementById('inspection-components');
+    if (list) list.innerHTML = inspectionTaxonomy.map(row => `<option value="${escapeHtml(row.name)}"></option>`).join('');
+  } catch (e) { /* legacy free-text behaviour remains available */ }
+}
+
+function applyTaxonomyDefectOptions() {
+  if (!inspectionTaxonomy.length) return;
+  const componentName = document.getElementById('df-component').value.trim();
+  const component = inspectionTaxonomy.find(row => row.name.toLowerCase() === componentName.toLowerCase());
+  if (!component) return;
+  const select = document.getElementById('df-defect-type');
+  const previous = select.value;
+  select.innerHTML = '<option value="">— Select —</option>' + (component.defect_types || []).map(row => `<option value="${escapeHtml(row.name)}">${escapeHtml(row.name)}</option>`).join('');
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  updateDefectStatusOptions();
+}
 
 // ── Photo zoom — scoped ONLY to the image (lightbox-zoom-layer), never
 // the page. Wheel and pinch events on the image wrap are intercepted with
@@ -3018,15 +3073,34 @@ function showDefectHistory(id) {
 }
 
 async function deleteTowerDefect(id) {
-  if (!await showConfirm('Delete this defect marking?')) return;
+  const reason = await promptForAnnotationDeletion();
+  if (reason === null) return;
   try {
-    await fetch(`/api/tower-defects/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/tower-defects/${id}`, { method: 'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason}) });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Could not delete defect.'); return; }
     const photo = currentFilteredPhotos[currentPhotoIndex];
     if (photo) loadPhotoDefects(photo.id);
     loadTowerPhotos();
   } catch (e) {
     showToast('Could not delete defect.');
   }
+}
+
+function promptForAnnotationDeletion() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'app-confirm-overlay';
+    overlay.innerHTML = `<div class="app-confirm-box"><div class="app-confirm-msg">Delete this defect marking?</div>
+      <textarea class="app-comment-textarea" rows="3" placeholder="Reason (optional)"></textarea>
+      <div class="app-confirm-actions"><button class="btn-ghost" type="button">Cancel</button><button class="btn-primary" type="button">Delete Annotation</button></div></div>`;
+    document.body.appendChild(overlay);
+    const buttons = overlay.querySelectorAll('button');
+    const finish = value => { overlay.remove(); resolve(value); };
+    buttons[0].onclick = () => finish(null);
+    buttons[1].onclick = () => finish(overlay.querySelector('textarea').value.trim());
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
+  });
 }
 
 // ── Thermal temperature measurement (Point / Rectangle / Line) ──────────
@@ -3898,6 +3972,7 @@ function toggleLineNumbers(divisionId, line, key, btnEl) {
 
 // ── Tower list sidebar + search (opened via a line's "#" numbers toggle) ──
 let sidebarTowerPoints = [];  // [{label, lat, lng}] for whichever line's sidebar is open
+let sidebarTowerSummary = {};
 
 async function openTowerListSidebar(line) {
   document.getElementById('pm-tower-sidebar-title').textContent = `Towers — ${line.name}`;
@@ -3931,6 +4006,7 @@ async function openTowerListSidebar(line) {
     const res = await fetch(`/api/lines/${line.id}/tower-summary`);
     const data = await res.json();
     summary = data.towers || {};
+    sidebarTowerSummary = summary;
   } catch (e) { /* falls through — rows just show as not-inspected/0 defects, the honest fallback */ }
 
   body.innerHTML = sidebarTowerPoints.map(t => {
@@ -3939,12 +4015,12 @@ async function openTowerListSidebar(line) {
       ? `<span class="pm-tower-row-status done">Inspection done</span>`
       : `<span class="pm-tower-row-status pending">Inspection not done</span>`;
     return `
-    <div class="pm-tower-row" data-label="${escapeHtml(t.label.toLowerCase())}" onclick="goToTowerLatLng(${t.lat}, ${t.lng})">
+    <div class="pm-tower-row" data-label="${escapeHtml(t.label.toLowerCase())}" data-done="${s.inspection_done ? '1' : '0'}" data-open="${s.open_defect_count || 0}" data-critical="${s.critical_defect_count || 0}" onclick="goToTowerLatLng(${t.lat}, ${t.lng}, '${escapeHtml(t.label).replace(/'/g, "\\'")}')">
       <div class="pm-tower-row-main">
         <span class="pm-tower-row-label">T${escapeHtml(t.label)}</span>
         ${statusBadge}
       </div>
-      <span class="pm-tower-row-defects" title="Defects marked">${s.defect_count}</span>
+      <span class="pm-tower-row-defects" title="Open defects">${s.open_defect_count || 0}</span>
     </div>`;
   }).join('');
 }
@@ -3953,12 +4029,20 @@ function closeTowerListSidebar() {
   document.getElementById('pm-tower-sidebar').classList.remove('open');
   document.getElementById('pm-tower-search-input').value = '';
   sidebarTowerPoints = [];
+  sidebarTowerSummary = {};
 }
 
 function filterTowerSidebarList(query) {
-  const q = query.trim().toLowerCase();
+  const input = document.getElementById('pm-tower-search-input');
+  const q = (typeof query === 'string' ? query : (input ? input.value : '')).trim().toLowerCase();
+  const filter = document.getElementById('pm-tower-status-filter')?.value || 'all';
   document.querySelectorAll('#pm-tower-sidebar-body .pm-tower-row').forEach(row => {
-    row.classList.toggle('no-match', q !== '' && !row.dataset.label.includes(q));
+    const textMismatch = q !== '' && !row.dataset.label.includes(q);
+    const statusMismatch = (filter === 'pending' && row.dataset.done === '1') ||
+      (filter === 'done' && row.dataset.done !== '1') ||
+      (filter === 'open' && Number(row.dataset.open || 0) < 1) ||
+      (filter === 'critical' && Number(row.dataset.critical || 0) < 1);
+    row.classList.toggle('no-match', textMismatch || statusMismatch);
   });
 }
 
@@ -3969,8 +4053,18 @@ function goToFirstMatchingTower() {
   if (match) goToTowerLatLng(match.lat, match.lng);
 }
 
-function goToTowerLatLng(lat, lng) {
+function goToTowerLatLng(lat, lng, label) {
   pmMap.setView([lat, lng], 18);
+  if (label) sessionStorage.setItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, label);
+}
+
+function goToAdjacentTower(direction) {
+  if (!sidebarTowerPoints.length) return;
+  const current = sessionStorage.getItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`) || currentTowerLabel || '';
+  let index = sidebarTowerPoints.findIndex(t => t.label === current);
+  if (index < 0) index = direction > 0 ? -1 : 0;
+  const next = sidebarTowerPoints[(index + direction + sidebarTowerPoints.length) % sidebarTowerPoints.length];
+  if (next) goToTowerLatLng(next.lat, next.lng, next.label);
 }
 
 function syncLineNumberButtonUI(key) {

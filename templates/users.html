@@ -238,6 +238,7 @@
 {% endblock %}
 
 {% block body %}
+{% from "_admin_nav_icons.html" import admin_nav_icon %}
 <div class="um-page">
   <nav class="navbar">
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
@@ -252,16 +253,19 @@
     <div class="admin-sidebar">
       <div class="admin-sb-title">Navigation</div>
       <a class="admin-sb-item" href="{{ url_for('admin') }}">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19V13M10 19V9M16 19V5M22 19H2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div> Dashboard
+        <div class="admin-sb-icon">{{ admin_nav_icon('dashboard') }}</div> Dashboard
       </a>
       <a class="admin-sb-item active" href="{{ url_for('users.users_page') }}">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.2" stroke="currentColor" stroke-width="1.4"/><path d="M15.3 14.2c2.6.5 4.7 2.7 4.7 5.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div> User Management
+        <div class="admin-sb-icon">{{ admin_nav_icon('users') }}</div> User Management
       </a>
       <a class="admin-sb-item" href="{{ url_for('admin') }}?view=modules">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg></div> Module Management
+        <div class="admin-sb-icon">{{ admin_nav_icon('modules') }}</div> Module Management
+      </a>
+      <a class="admin-sb-item" href="{{ url_for('settings_bp.inspection_quality_page') }}">
+        <div class="admin-sb-icon">{{ admin_nav_icon('quality') }}</div> Inspection Quality
       </a>
       <a class="admin-sb-item" href="{{ url_for('settings_bp.settings_page') }}">
-        <div class="admin-sb-icon"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M12 2V5M12 19V22M22 12H19M5 12H2M19.07 4.93L16.95 7.05M7.05 16.95L4.93 19.07M19.07 19.07L16.95 16.95M7.05 7.05L4.93 4.93" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div> Settings
+        <div class="admin-sb-icon">{{ admin_nav_icon('settings') }}</div> Settings
       </a>
     </div>
 

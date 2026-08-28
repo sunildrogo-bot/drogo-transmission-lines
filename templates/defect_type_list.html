@@ -49,6 +49,7 @@
 {% endblock %}
 
 {% block body %}
+{% from "_breadcrumb.html" import breadcrumb %}
 <div class="dtl-page">
   <nav class="navbar">
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
@@ -57,6 +58,11 @@
       <a href="{{ url_for('projects_bp.project_divisions', project_id=project.id) }}" class="btn-ghost">← Divisions</a>
     </div>
   </nav>
+  {{ breadcrumb([
+    {'label': project.module, 'url': url_for(back_endpoint)},
+    {'label': project.name, 'url': url_for('projects_bp.project_overview', project_id=project.id)},
+    {'label': defect_type, 'url': none}
+  ]) }}
 
   <div class="dtl-content">
     <a href="{{ url_for('projects_bp.project_overview', project_id=project.id) }}" class="dtl-back">&larr; Back to Overview</a>

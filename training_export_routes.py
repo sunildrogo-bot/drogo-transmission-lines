@@ -14,7 +14,7 @@ from flask import Blueprint, current_app, jsonify, render_template, request, sen
 from PIL import Image
 from werkzeug.utils import secure_filename
 
-from models import db, Project, TowerInspectionStatus, TowerPhoto
+from models import db, Project, TowerDefect, TowerInspectionStatus, TowerPhoto
 
 
 training_export_bp = Blueprint('training_export_bp', __name__)
@@ -38,6 +38,32 @@ def _export_root(app=None):
 
 def _job_path(job_id, app=None):
     return os.path.join(_export_root(app), f'{job_id}.json')
+
+
+def _class_config_path(app=None):
+    app = app or current_app
+    os.makedirs(app.instance_path, exist_ok=True)
+    return os.path.join(app.instance_path, 'training_class_map.json')
+
+
+def _read_class_config(app=None):
+    try:
+        with open(_class_config_path(app), encoding='utf-8') as handle:
+            data = json.load(handle)
+        if not isinstance(data.get('mappings'), dict) or not isinstance(data.get('class_order'), list):
+            raise ValueError('Invalid class map')
+        return data
+    except (OSError, ValueError, TypeError):
+        return {'version': 1, 'class_order': [], 'mappings': {}}
+
+
+def _write_class_config(data, app=None):
+    path = _class_config_path(app)
+    temporary = f'{path}.{uuid.uuid4().hex}.tmp'
+    with _job_lock:
+        with open(temporary, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(temporary, path)
 
 
 def _read_job(job_id, app=None):
@@ -71,6 +97,16 @@ def _absolute_photo_path(photo, app=None):
 
 def _canonical_label(value):
     return ' '.join((value or '').strip().split())
+
+
+def _mapped_label(source_label, config):
+    source = _canonical_label(source_label)
+    if not source:
+        return ''
+    rule = config.get('mappings', {}).get(source.casefold())
+    if rule and rule.get('enabled') is False:
+        return ''
+    return _canonical_label(rule.get('target')) if rule else source
 
 
 def _safe_dataset_name(value):
@@ -160,6 +196,7 @@ def _build_plan(selection):
         ).all()
     }
     photos = TowerPhoto.query.filter(TowerPhoto.line_id.in_(selected_line_ids)).order_by(TowerPhoto.id).all()
+    class_config = _read_class_config()
     positives, negative_candidates, warnings = [], [], []
     label_lookup = {}
     missing_files = invalid_annotations = empty_labels = 0
@@ -175,7 +212,9 @@ def _build_plan(selection):
             continue
         annotations = []
         for defect in photo.defects:
-            label = _canonical_label(defect.defect_type)
+            if defect.deleted_at:
+                continue
+            label = _mapped_label(defect.defect_type, class_config)
             if not label:
                 empty_labels += 1
                 continue
@@ -216,8 +255,11 @@ def _build_plan(selection):
     if not selection['labels_only'] and source_bytes > available_bytes * .95:
         warnings.append('The selected images may exceed currently available export disk space.')
     split_map = _split_towers([item['tower_key'] for item in items], selection['split_seed'])
-    labels = [label_lookup[key] for key in sorted(label_lookup)]
-    class_ids = {key: index for index, key in enumerate(sorted(label_lookup))}
+    configured_order = [str(value).casefold() for value in class_config.get('class_order', [])]
+    ordered_keys = [key for key in configured_order if key in label_lookup]
+    ordered_keys.extend(key for key in sorted(label_lookup) if key not in ordered_keys)
+    labels = [label_lookup[key] for key in ordered_keys]
+    class_ids = {key: index for index, key in enumerate(ordered_keys)}
     class_counts = {label: 0 for label in labels}
     split_counts = {'train': 0, 'val': 0, 'test': 0}
     annotation_count = 0
@@ -332,7 +374,9 @@ def _run_export(app, job_id, selection, actor):
                     'format': selection['format'], 'image_domain': 'RGB', 'split_unit': 'tower',
                     'split_seed': selection['split_seed'], 'labels_only': selection['labels_only'],
                     'summary': _preview_dict(plan), 'classes': plan['labels'],
+                    'class_mapping': _read_class_config(app),
                 }, indent=2))
+                archive.writestr('class_mapping.json', json.dumps(_read_class_config(app), indent=2))
                 archive.writestr('README.txt', 'Generated from DROGO reviewed RGB tower annotations.\nSplits are grouped by complete tower to reduce data leakage.\n')
             job.update(status='Completed', progress=100, finished_at=datetime.utcnow().isoformat() + 'Z',
                        file_name=os.path.basename(zip_path), download_name=f'{dataset_name}.zip',
@@ -365,6 +409,66 @@ def training_dataset_options():
             ]})
         projects.append({'id': project.id, 'name': project.name, 'module': project.module, 'divisions': divisions})
     return jsonify({'projects': projects})
+
+
+@training_export_bp.route('/api/training-datasets/classes')
+def training_dataset_classes():
+    guard = _admin_guard()
+    if guard:
+        return guard
+    config = _read_class_config()
+    observed = {}
+    for defect in TowerDefect.query.filter(TowerDefect.deleted_at.is_(None)).order_by(TowerDefect.id).all():
+        source = _canonical_label(defect.defect_type)
+        if not source:
+            continue
+        key = source.casefold()
+        entry = observed.setdefault(key, {'source': source, 'annotation_count': 0})
+        entry['annotation_count'] += 1
+    rows = []
+    for key, entry in sorted(observed.items(), key=lambda item: item[1]['source'].casefold()):
+        rule = config.get('mappings', {}).get(key, {})
+        rows.append({'source': entry['source'], 'target': _canonical_label(rule.get('target')) or entry['source'],
+                     'enabled': rule.get('enabled') is not False, 'annotation_count': entry['annotation_count']})
+    return jsonify({'classes': rows, 'class_order': config.get('class_order', [])})
+
+
+@training_export_bp.route('/api/training-datasets/classes', methods=['PUT'])
+def update_training_dataset_classes():
+    guard = _admin_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get('classes')
+    if not isinstance(rows, list):
+        return jsonify({'error': 'classes must be a list.'}), 400
+    existing = _read_class_config()
+    mappings, requested_targets = {}, []
+    for row in rows:
+        source = _canonical_label(row.get('source') if isinstance(row, dict) else '')
+        target = _canonical_label(row.get('target') if isinstance(row, dict) else '')
+        enabled = bool(row.get('enabled', True)) if isinstance(row, dict) else False
+        if not source:
+            continue
+        if enabled and not target:
+            return jsonify({'error': f'Enter a training class for {source} or exclude it.'}), 400
+        if len(target) > 100:
+            return jsonify({'error': f'Training class for {source} is too long.'}), 400
+        mappings[source.casefold()] = {'source': source, 'target': target or source, 'enabled': enabled}
+        if enabled and target.casefold() not in {value.casefold() for value in requested_targets}:
+            requested_targets.append(target)
+    requested_keys = {value.casefold() for value in requested_targets}
+    class_order, seen_targets = [], set()
+    for target in list(existing.get('class_order', [])) + requested_targets:
+        key = str(target).casefold()
+        if key in requested_keys and key not in seen_targets:
+            seen_targets.add(key)
+            class_order.append(next(value for value in requested_targets if value.casefold() == key))
+    config = {'version': 1, 'updated_at': datetime.utcnow().isoformat() + 'Z',
+              'updated_by': session.get('user_name', 'Admin'),
+              'class_order': class_order, 'mappings': mappings}
+    _write_class_config(config)
+    return jsonify({'saved': True, 'class_order': class_order})
 
 
 @training_export_bp.route('/api/training-datasets/preview', methods=['POST'])

@@ -14,6 +14,82 @@ function showDatasetError(message) {
   box.style.display = message ? 'block' : 'none';
 }
 
+function showClassError(message) {
+  const box = document.getElementById('ds-class-error');
+  box.textContent = message || '';
+  box.style.display = message ? 'block' : 'none';
+}
+
+async function loadDatasetClasses() {
+  const target = document.getElementById('ds-class-manager');
+  try {
+    const response = await fetch('/api/training-datasets/classes');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not load classes.');
+    const classes = data.classes || [];
+    target.innerHTML = '';
+    const header = document.createElement('div');
+    header.className = 'class-head';
+    header.innerHTML = '<span>Observed defect type</span><span>Training class</span><span>Use</span>';
+    target.appendChild(header);
+    classes.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'class-map-row';
+      row.dataset.source = item.source;
+      const source = document.createElement('div');
+      source.className = 'class-source';
+      source.textContent = item.source;
+      const count = document.createElement('small');
+      count.textContent = `${item.annotation_count} annotation${item.annotation_count === 1 ? '' : 's'}`;
+      source.appendChild(count);
+      const input = document.createElement('input');
+      input.className = 'class-target';
+      input.value = item.target;
+      input.maxLength = 100;
+      input.disabled = !item.enabled;
+      const enabledWrap = document.createElement('label');
+      enabledWrap.className = 'class-enabled';
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.className = 'class-enabled-input';
+      enabled.checked = item.enabled;
+      enabled.setAttribute('aria-label', `Use ${item.source}`);
+      enabled.addEventListener('change', () => { input.disabled = !enabled.checked; invalidatePreview(); });
+      input.addEventListener('input', invalidatePreview);
+      enabledWrap.appendChild(enabled);
+      row.append(source, input, enabledWrap);
+      target.appendChild(row);
+    });
+    if (!classes.length) target.innerHTML = '<div class="preview-empty" style="padding:22px">No defect types have been saved yet.</div>';
+  } catch (error) {
+    target.innerHTML = `<div class="preview-empty" style="padding:22px">${dsEscape(error.message)}</div>`;
+  }
+}
+
+async function saveDatasetClasses() {
+  showClassError('');
+  const button = document.getElementById('ds-save-classes');
+  const classes = [...document.querySelectorAll('.class-map-row')].map(row => ({
+    source: row.dataset.source,
+    target: row.querySelector('.class-target').value.trim(),
+    enabled: row.querySelector('.class-enabled-input').checked,
+  }));
+  button.disabled = true; button.textContent = 'Saving…';
+  try {
+    const response = await fetch('/api/training-datasets/classes', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({classes})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save class mapping.');
+    button.textContent = 'Saved';
+    invalidatePreview();
+    setTimeout(() => { button.textContent = 'Save Class Mapping'; }, 900);
+  } catch (error) {
+    showClassError(error.message);
+    button.textContent = 'Save Class Mapping';
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function datasetPayload() {
   return {
     project_id: document.getElementById('ds-project').value,
@@ -149,7 +225,7 @@ async function deleteDatasetExport(jobId) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadDatasetOptions(); loadDatasetJobs();
+  loadDatasetClasses(); loadDatasetOptions(); loadDatasetJobs();
   document.getElementById('ds-project').addEventListener('change', renderDatasetLines);
   ['ds-format','ds-negative-ratio','ds-done-only','ds-negatives','ds-labels-only'].forEach(id => document.getElementById(id).addEventListener('change', invalidatePreview));
 });
