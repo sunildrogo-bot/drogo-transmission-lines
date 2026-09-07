@@ -12,11 +12,12 @@ Register in app.py with: app.register_blueprint(settings_bp)
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app
 from datetime import datetime, date, timedelta
 import os
-from sqlalchemy import or_
+import shutil
 
 import settings as app_settings
-from models import db, ActivityLog, User, Project, TowerDefect, TowerPhoto, Line, PilotLocation, Division, TowerInspectionStatus, InspectionComponent, InspectionDefectType
+from models import db, ActivityLog, User, Project, TowerDefect, TowerPhoto, Line, PilotLocation, Division, TowerInspectionStatus, InspectionComponent, InspectionDefectType, BackgroundJob, AppSetting, SystemHealthSnapshot, ServiceHeartbeat
 import json
+from sqlalchemy import text as sql_text
 from storage_cleanup import delete_stored_files
 
 settings_bp = Blueprint('settings_bp', __name__)
@@ -56,168 +57,95 @@ def settings_page():
 
 @settings_bp.route('/inspection-quality')
 def inspection_quality_page():
-    """Admin's tower-level inspection and evidence quality workspace."""
     guard = _require_admin()
     if guard:
         return guard
-    return render_template(
-        'inspection_quality.html',
-        user_name=session['user_name'],
-        can_switch_client='Client User' in session.get('all_roles', []),
-    )
+    return render_template('inspection_quality.html', user_name=session['user_name'],
+                           can_switch_client='Client User' in session.get('all_roles', []))
 
 
 def _quality_file_exists(stored_path):
-    """Resolve the relative paths stored by old and current app versions."""
-    value = (stored_path or '').strip().replace('\\', '/')
-    if not value:
+    if not stored_path:
         return False
-    if os.path.isabs(value):
-        return os.path.isfile(value)
-    value = value.lstrip('/')
-    if value.startswith('static/'):
-        candidate = os.path.join(current_app.root_path, *value.split('/'))
-    else:
-        candidate = os.path.join(current_app.static_folder, *value.split('/'))
-    return os.path.isfile(candidate)
+    try:
+        from storage_service import get_storage
+        return get_storage().exists(stored_path)
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 @settings_bp.route('/api/inspection-quality', methods=['GET'])
 def api_inspection_quality():
-    """Tower-level completion, defects and evidence health.
-
-    There is deliberately no image-review metric. Inspection Done is the
-    authoritative SME decision and the Client-release gate.
-    """
+    """Tower-level completion, defects and evidence health for Admin."""
     guard = _require_admin()
     if guard:
         return guard
-
     lines = Line.query.order_by(Line.name.asc()).all()
     line_ids = [line.id for line in lines]
-
-    done_by_line = {line_id: set() for line_id in line_ids}
-    photo_labels_by_line = {line_id: set() for line_id in line_ids}
-    photo_count_by_line = {line_id: 0 for line_id in line_ids}
-    rgb_count_by_line = {line_id: 0 for line_id in line_ids}
-    thermal_count_by_line = {line_id: 0 for line_id in line_ids}
-    missing_files_by_line = {line_id: 0 for line_id in line_ids}
-    missing_thumbs_by_line = {line_id: 0 for line_id in line_ids}
-
+    done = {line_id: set() for line_id in line_ids}
+    labels = {line_id: set() for line_id in line_ids}
+    counts = {line_id: {'photos': 0, 'rgb': 0, 'thermal': 0, 'missing': 0, 'thumbs': 0}
+              for line_id in line_ids}
     if line_ids:
         for row in TowerInspectionStatus.query.filter(
-            TowerInspectionStatus.line_id.in_(line_ids),
-            TowerInspectionStatus.inspection_done.is_(True),
-        ).all():
-            done_by_line.setdefault(row.line_id, set()).add(row.tower_label)
-
+                TowerInspectionStatus.line_id.in_(line_ids),
+                TowerInspectionStatus.inspection_done.is_(True)).all():
+            done[row.line_id].add(row.tower_label)
         for photo in TowerPhoto.query.filter(TowerPhoto.line_id.in_(line_ids)).all():
-            photo_labels_by_line.setdefault(photo.line_id, set()).add(photo.tower_label)
-            photo_count_by_line[photo.line_id] = photo_count_by_line.get(photo.line_id, 0) + 1
-            if photo.is_thermal_image():
-                thermal_count_by_line[photo.line_id] = thermal_count_by_line.get(photo.line_id, 0) + 1
-            else:
-                rgb_count_by_line[photo.line_id] = rgb_count_by_line.get(photo.line_id, 0) + 1
+            labels[photo.line_id].add(photo.tower_label)
+            item = counts[photo.line_id]
+            item['photos'] += 1
+            item['thermal' if photo.is_thermal_image() else 'rgb'] += 1
             if not _quality_file_exists(photo.display_image_path()):
-                missing_files_by_line[photo.line_id] = missing_files_by_line.get(photo.line_id, 0) + 1
+                item['missing'] += 1
             if not _quality_file_exists(photo.thumbnail_path):
-                missing_thumbs_by_line[photo.line_id] = missing_thumbs_by_line.get(photo.line_id, 0) + 1
-
-    open_by_line = {}
-    critical_by_line = {}
-    taxonomy_by_line = {}
-    if line_ids:
-        open_by_line = dict(
-            db.session.query(TowerPhoto.line_id, db.func.count(TowerDefect.id))
-            .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-            .filter(
-                TowerPhoto.line_id.in_(line_ids),
-                TowerDefect.deleted_at.is_(None),
-                TowerDefect.resolution_status == 'Open',
-            ).group_by(TowerPhoto.line_id).all()
-        )
-        critical_by_line = dict(
-            db.session.query(TowerPhoto.line_id, db.func.count(TowerDefect.id))
-            .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-            .filter(
-                TowerPhoto.line_id.in_(line_ids),
-                TowerDefect.deleted_at.is_(None),
-                TowerDefect.resolution_status == 'Open',
-                TowerDefect.severity == 'Critical',
-            ).group_by(TowerPhoto.line_id).all()
-        )
-        taxonomy_by_line = dict(
-            db.session.query(TowerPhoto.line_id, db.func.count(TowerDefect.id))
-            .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-            .filter(
-                TowerPhoto.line_id.in_(line_ids),
-                TowerDefect.deleted_at.is_(None),
-                or_(
-                    db.func.trim(db.func.coalesce(TowerDefect.component_name, '')) == '',
-                    db.func.trim(db.func.coalesce(TowerDefect.defect_type, '')) == '',
-                ),
-            ).group_by(TowerPhoto.line_id).all()
-        )
-
-    rows = []
-    project_options = {}
-    totals = {
-        'towers': 0, 'inspection_done': 0, 'inspection_not_done': 0,
-        'open_defects': 0, 'critical_defects': 0, 'missing_files': 0,
-        'missing_thumbnails': 0, 'taxonomy_issues': 0,
-        'rgb_images': 0, 'thermal_images': 0,
-    }
+                item['thumbs'] += 1
+    def defect_counts(*extra):
+        if not line_ids:
+            return {}
+        return dict(db.session.query(TowerPhoto.line_id, db.func.count(TowerDefect.id))
+                    .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
+                    .filter(TowerPhoto.line_id.in_(line_ids), TowerDefect.deleted_at.is_(None), *extra)
+                    .group_by(TowerPhoto.line_id).all())
+    open_counts = defect_counts(TowerDefect.resolution_status == 'Open')
+    critical_counts = defect_counts(TowerDefect.resolution_status == 'Open', TowerDefect.severity == 'Critical')
+    taxonomy_counts = defect_counts(db.or_(
+        db.func.trim(db.func.coalesce(TowerDefect.component_name, '')) == '',
+        db.func.trim(db.func.coalesce(TowerDefect.defect_type, '')) == ''))
+    rows, projects = [], {}
+    totals = {key: 0 for key in ('towers', 'inspection_done', 'inspection_not_done',
+              'open_defects', 'critical_defects', 'missing_files', 'missing_thumbnails',
+              'taxonomy_issues', 'rgb_images', 'thermal_images')}
     for line in lines:
         project = line.division.project if line.division and line.division.project else None
-        project_id = project.id if project else 0
-        project_name = project.name if project else 'Unassigned project'
-        project_options[project_id] = project_name
-        known_labels = photo_labels_by_line.get(line.id, set()) | done_by_line.get(line.id, set())
-        configured_total = max(0, int(line.tower_count or 0))
-        tower_total = max(configured_total, len(known_labels))
-        done = len(done_by_line.get(line.id, set()))
-        not_done = max(0, tower_total - done)
-        row = {
-            'line_id': line.id,
-            'line_name': line.name,
-            'division_name': line.division.name if line.division else '',
-            'project_id': project_id,
-            'project_name': project_name,
-            'total_towers': tower_total,
-            'inspection_done': done,
-            'client_visible': done,
-            'inspection_not_done': not_done,
-            'photos': photo_count_by_line.get(line.id, 0),
-            'rgb_images': rgb_count_by_line.get(line.id, 0),
-            'thermal_images': thermal_count_by_line.get(line.id, 0),
-            'open_defects': int(open_by_line.get(line.id, 0) or 0),
-            'critical_defects': int(critical_by_line.get(line.id, 0) or 0),
-            'missing_files': missing_files_by_line.get(line.id, 0),
-            'missing_thumbnails': missing_thumbs_by_line.get(line.id, 0),
-            'taxonomy_issues': int(taxonomy_by_line.get(line.id, 0) or 0),
-            'open_url': f'/projects/{project_id}/map?line={line.id}' if project_id else '',
-        }
-        row['attention_score'] = (
-            row['critical_defects'] * 1000 + row['missing_files'] * 100
-            + row['inspection_not_done'] * 10 + row['taxonomy_issues']
-        )
+        project_id, project_name = (project.id, project.name) if project else (0, 'Unassigned project')
+        projects[project_id] = project_name
+        known = labels[line.id] | done[line.id]
+        tower_total = max(0, int(line.tower_count or 0)) or len(known)
+        done_count = len(done[line.id])
+        item = counts[line.id]
+        row = {'line_id': line.id, 'line_name': line.name,
+               'division_name': line.division.name if line.division else '',
+               'project_id': project_id, 'project_name': project_name,
+               'total_towers': tower_total, 'inspection_done': done_count,
+               'client_visible': done_count, 'inspection_not_done': max(0, tower_total - done_count),
+               'photos': item['photos'], 'rgb_images': item['rgb'], 'thermal_images': item['thermal'],
+               'open_defects': int(open_counts.get(line.id, 0) or 0),
+               'critical_defects': int(critical_counts.get(line.id, 0) or 0),
+               'missing_files': item['missing'], 'missing_thumbnails': item['thumbs'],
+               'taxonomy_issues': int(taxonomy_counts.get(line.id, 0) or 0),
+               'open_url': f'/projects/{project_id}/map?line={line.id}' if project_id else ''}
+        row['attention_score'] = row['critical_defects'] * 1000 + row['missing_files'] * 100 + row['inspection_not_done'] * 10 + row['taxonomy_issues']
         rows.append(row)
+        totals['towers'] += tower_total
         for key in totals:
-            if key == 'towers':
-                totals[key] += tower_total
-            elif key in row:
+            if key != 'towers' and key in row:
                 totals[key] += row[key]
-
-    rows.sort(key=lambda item: (-item['attention_score'], (item['project_name'] or '').lower(), (item['line_name'] or '').lower()))
-    return jsonify({
-        'summary': totals,
-        'projects': [{'id': key, 'name': value} for key, value in sorted(project_options.items(), key=lambda item: item[1].lower())],
-        'lines': rows,
-        'workflow': {
-            'image_review_required': False,
-            'client_release_rule': 'Inspection Done',
-        },
-    })
+    rows.sort(key=lambda item: (-item['attention_score'], item['project_name'].lower(), item['line_name'].lower()))
+    return jsonify({'summary': totals,
+                    'projects': [{'id': key, 'name': value} for key, value in sorted(projects.items(), key=lambda item: item[1].lower())],
+                    'lines': rows,
+                    'workflow': {'image_review_required': False, 'client_release_rule': 'Inspection Done'}})
 
 
 def _format_bytes(value):
@@ -242,27 +170,207 @@ def api_storage_summary():
     if guard:
         return guard
 
-    uploads_root = os.path.join(current_app.static_folder, 'uploads')
-    total_bytes = 0
-    file_count = 0
     try:
-        for root, _dirs, filenames in os.walk(uploads_root):
-            for filename in filenames:
-                path = os.path.join(root, filename)
-                try:
-                    total_bytes += os.path.getsize(path)
-                    file_count += 1
-                except OSError:
-                    continue
-    except OSError:
-        pass
+        from storage_service import get_storage
+        storage = get_storage()
+        inventory = storage.inventory()
+        total_bytes = sum(item['size'] for item in inventory)
+        file_count = len(inventory)
+        storage_type = 'S3-compatible object storage' if storage.mode == 's3' else 'Application uploads folder'
+        disk_total = disk_free = used_percent = None
+        if storage.mode == 'local':
+            disk = shutil.disk_usage(storage.root)
+            disk_total, disk_free = disk.total, disk.free
+            used_percent = round((disk.used / disk.total) * 100, 1) if disk.total else 0
+    except (OSError, RuntimeError):
+        total_bytes, file_count, storage_type = 0, 0, 'Storage unavailable'
+        disk_total = disk_free = used_percent = None
 
     return jsonify({
         'bytes': total_bytes,
         'formatted_size': _format_bytes(total_bytes),
         'file_count': file_count,
-        'storage_type': 'Application uploads folder',
+        'storage_type': storage_type,
+        'disk_total': _format_bytes(disk_total) if disk_total is not None else None,
+        'disk_free': _format_bytes(disk_free) if disk_free is not None else None,
+        'used_percent': used_percent,
     })
+
+
+@settings_bp.route('/api/settings/thumbnail-repair', methods=['GET', 'POST'])
+def api_thumbnail_repair():
+    guard = _require_admin()
+    if guard:
+        return guard
+    if request.method == 'POST':
+        active = BackgroundJob.query.filter(
+            BackgroundJob.job_type == 'thumbnail_repair',
+            BackgroundJob.status.in_(['Queued', 'Processing'])).first()
+        if active:
+            return jsonify(active.to_dict()), 200
+        from background_jobs import enqueue
+        job = enqueue('thumbnail_repair', request.get_json(silent=True) or {},
+                      session.get('user_id'), session.get('user_name', ''))
+        return jsonify(job.to_dict()), 202
+    from background_jobs import thumbnail_exists
+    missing = sum(1 for photo in TowerPhoto.query.all() if not thumbnail_exists(photo))
+    jobs = (BackgroundJob.query.filter_by(job_type='thumbnail_repair')
+            .order_by(BackgroundJob.id.desc()).limit(10).all())
+    return jsonify({'missing': missing, 'jobs': [job.to_dict() for job in jobs]})
+
+
+@settings_bp.route('/api/settings/background-jobs/<int:job_id>', methods=['GET'])
+def api_background_job(job_id):
+    guard = _require_admin()
+    if guard:
+        return guard
+    return jsonify(BackgroundJob.query.get_or_404(job_id).to_dict())
+
+
+@settings_bp.route('/api/settings/media-metadata-repair', methods=['GET', 'POST'])
+def api_media_metadata_repair():
+    guard = _require_admin()
+    if guard:
+        return guard
+    if request.method == 'POST':
+        active = BackgroundJob.query.filter(
+            BackgroundJob.job_type == 'media_metadata_repair',
+            BackgroundJob.status.in_(['Queued', 'Processing'])).first()
+        if active:
+            return jsonify(active.to_dict())
+        from background_jobs import enqueue
+        job = enqueue('media_metadata_repair', request.get_json(silent=True) or {},
+                      session.get('user_id'), session.get('user_name', ''))
+        return jsonify(job.to_dict()), 202
+    legacy_count = TowerPhoto.query.filter(
+        db.or_(TowerPhoto.validation_status.is_(None), TowerPhoto.validation_status == 'Legacy',
+               TowerPhoto.media_type.is_(None))).count()
+    jobs = (BackgroundJob.query.filter_by(job_type='media_metadata_repair')
+            .order_by(BackgroundJob.id.desc()).limit(10).all())
+    return jsonify({'legacy_count': legacy_count, 'jobs': [job.to_dict() for job in jobs]})
+
+
+@settings_bp.route('/api/settings/system-health', methods=['GET'])
+def api_system_health():
+    """Shared readiness view for Admin; records no credentials or file names."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    import time
+    import socket
+    started = time.perf_counter()
+    details, state = {}, 'Healthy'
+    try:
+        db.session.execute(sql_text('SELECT 1'))
+        details['database'] = {'status': 'ok', 'backend': db.engine.url.get_backend_name()}
+    except Exception as exc:
+        db.session.rollback()
+        details['database'] = {'status': 'error', 'error': str(exc)[:160]}
+        state = 'Degraded'
+    try:
+        from storage_service import get_storage
+        details['storage'] = get_storage().health()
+    except Exception as exc:
+        details['storage'] = {'status': 'error', 'error': str(exc)[:160]}
+        state = 'Degraded'
+    service = ServiceHeartbeat.query.filter_by(service_type='worker').order_by(ServiceHeartbeat.last_seen.desc()).first()
+    details['worker'] = {'status': 'not_started'}
+    if service:
+        age = max(0, (datetime.utcnow() - service.last_seen).total_seconds())
+        details['worker'] = {'status': 'ok' if age <= 30 else 'stale', 'age_seconds': round(age),
+                             'service_id': service.service_id}
+        if age > 30: state = 'Degraded'
+    environment = current_app.config.get('DEPLOYMENT_ENV', 'development')
+    public_url = current_app.config.get('PUBLIC_BASE_URL', '')
+    proxy_count = int(os.environ.get('TRUST_PROXY_COUNT', '0') or 0)
+    server_software = request.environ.get('SERVER_SOFTWARE') or os.environ.get('SERVER_SOFTWARE') or 'unknown'
+    details['web'] = {
+        'status': 'ok', 'environment': environment, 'hostname': socket.gethostname(),
+        'process_id': os.getpid(), 'server': server_software,
+        'reverse_proxy_trusted': proxy_count > 0,
+        'forwarded_request': bool(request.headers.get('X-Forwarded-Proto') or request.headers.get('X-Forwarded-For')),
+        'public_https': public_url.casefold().startswith('https://'),
+    }
+    if environment == 'production':
+        warnings = []
+        if db.engine.url.get_backend_name() == 'sqlite': warnings.append('Production is using SQLite.')
+        if not details['web']['public_https']: warnings.append('PUBLIC_BASE_URL is not HTTPS.')
+        if not proxy_count: warnings.append('TRUST_PROXY_COUNT is not configured.')
+        if 'gunicorn' not in server_software.casefold(): warnings.append('Gunicorn was not identified from the request server.')
+        if warnings:
+            details['web']['status'] = 'warning'; details['web']['warnings'] = warnings; state = 'Degraded'
+    details['jobs'] = {
+        'queued': BackgroundJob.query.filter_by(status='Queued').count(),
+        'processing': BackgroundJob.query.filter_by(status='Processing').count(),
+        'failed': BackgroundJob.query.filter_by(status='Failed').count(),
+    }
+    oldest = BackgroundJob.query.filter_by(status='Queued').order_by(BackgroundJob.created_at.asc()).first()
+    details['jobs']['oldest_queued_seconds'] = max(0, round((datetime.utcnow() - oldest.created_at).total_seconds())) if oldest else 0
+    if details['jobs']['failed'] or details['jobs']['oldest_queued_seconds'] > 300:
+        state = 'Degraded'
+    details['map'] = {'mode': current_app.config.get('MAP_TILE_MODE', 'osm'), 'status': 'ok'}
+    if details['map']['mode'] == 'pmtiles':
+        value = current_app.config.get('PMTILES_URL', '')
+        if value.startswith('/static/'):
+            path = os.path.join(current_app.static_folder, value[len('/static/'):])
+            details['map']['archive_available'] = os.path.isfile(path)
+            if not details['map']['archive_available']:
+                details['map']['status'] = 'error'; state = 'Degraded'
+    elapsed = round((time.perf_counter() - started) * 1000, 2)
+    snapshot = SystemHealthSnapshot(source='admin_probe', status=state,
+                                    response_ms=elapsed, details_json=json.dumps(details))
+    db.session.add(snapshot)
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    SystemHealthSnapshot.query.filter(SystemHealthSnapshot.created_at < cutoff).delete(synchronize_session=False)
+    db.session.commit()
+    return jsonify({'status': state, 'response_ms': elapsed, 'checks': details,
+                    'checked_at': datetime.utcnow().isoformat() + 'Z'})
+
+
+@settings_bp.route('/api/settings/compatibility', methods=['GET'])
+def api_settings_compatibility():
+    guard = _require_admin()
+    if guard:
+        return guard
+    from feature_registry import source_compatibility
+    report = source_compatibility(current_app.root_path)
+    report['database_revision'] = 'unknown'
+    try:
+        report['database_revision'] = db.session.execute(
+            sql_text('SELECT version_num FROM alembic_version')).scalar() or 'unknown'
+    except Exception:
+        db.session.rollback()
+    report['worker'] = 'Not started'
+    service = ServiceHeartbeat.query.filter_by(service_type='worker').order_by(ServiceHeartbeat.last_seen.desc()).first()
+    if service:
+        age = (datetime.utcnow() - service.last_seen).total_seconds()
+        report['worker'] = 'Running' if age <= 30 else 'Not responding'
+        report['worker_last_seen_seconds'] = max(0, round(age))
+    else:
+        heartbeat = db.session.get(AppSetting, 'background_worker_heartbeat')
+        if heartbeat:
+            try:
+                age = (datetime.utcnow() - datetime.fromisoformat(heartbeat.value.rstrip('Z'))).total_seconds()
+                report['worker'] = 'Running' if age <= 30 else 'Not responding'
+            except ValueError:
+                pass
+    return jsonify(report)
+
+
+@settings_bp.route('/api/settings/storage-migration', methods=['GET', 'POST'])
+def api_storage_migration():
+    guard = _require_admin()
+    if guard:
+        return guard
+    from background_jobs import enqueue
+    from storage_service import get_storage
+    if request.method == 'POST':
+        active = BackgroundJob.query.filter_by(job_type='storage_migration').filter(
+            BackgroundJob.status.in_(['Queued', 'Processing'])).first()
+        job = active or enqueue('storage_migration', {}, session.get('user_id'), session.get('user_name', 'Admin'))
+        return jsonify({'job': job.to_dict(), 'storage_backend': get_storage().mode}), 202
+    jobs = BackgroundJob.query.filter_by(job_type='storage_migration').order_by(BackgroundJob.created_at.desc()).limit(10).all()
+    return jsonify({'jobs': [job.to_dict() for job in jobs], 'storage_backend': get_storage().mode})
 
 
 @settings_bp.route('/api/settings/inspection-taxonomy', methods=['GET'])
@@ -293,25 +401,14 @@ def api_save_inspection_taxonomy():
         return jsonify({'error': 'components must be a list.'}), 400
     seen_components = set()
     for index, item in enumerate(rows):
-        if not isinstance(item, dict):
-            return jsonify({'error': f'Component row {index + 1} must be an object.'}), 400
-        raw_name = item.get('name')
-        if raw_name is not None and not isinstance(raw_name, str):
-            return jsonify({'error': f'Component row {index + 1} has an invalid name.'}), 400
-        name = (raw_name or '').strip()[:150]
+        name = (item.get('name') or '').strip()[:150]
         if not name:
             return jsonify({'error': f'Component row {index + 1} needs a name.'}), 400
         key = name.casefold()
         if key in seen_components:
             return jsonify({'error': f'Duplicate component: {name}'}), 400
         seen_components.add(key)
-        component_id = item.get('id')
-        if component_id is not None:
-            try:
-                component_id = int(component_id)
-            except (TypeError, ValueError):
-                return jsonify({'error': f'Component row {index + 1} has an invalid id.'}), 400
-        component = db.session.get(InspectionComponent, component_id) if component_id else None
+        component = InspectionComponent.query.get(item.get('id')) if item.get('id') else None
         if not component:
             component = InspectionComponent.query.filter(db.func.lower(InspectionComponent.name) == name.lower()).first()
         if not component:
@@ -319,56 +416,35 @@ def api_save_inspection_taxonomy():
             db.session.add(component)
             db.session.flush()
         component.name = name
-        component.description = str(item.get('description') or '').strip()[:255]
+        component.description = (item.get('description') or '').strip()[:255]
         component.active = item.get('active') is not False
         component.display_order = index
         component.supports_rgb = item.get('supports_rgb') is not False
         component.supports_thermal = bool(item.get('supports_thermal'))
         component.severity_required = item.get('severity_required') is not False
 
-        type_rows = item.get('defect_types') or []
-        if not isinstance(type_rows, list):
-            return jsonify({'error': f'Defect types under {name} must be a list.'}), 400
         seen_types = set()
-        for type_index, type_item in enumerate(type_rows):
-            if not isinstance(type_item, dict):
-                return jsonify({'error': f'Defect type row {type_index + 1} under {name} must be an object.'}), 400
-            raw_type_name = type_item.get('name')
-            if raw_type_name is not None and not isinstance(raw_type_name, str):
-                return jsonify({'error': f'Defect type row {type_index + 1} under {name} has an invalid name.'}), 400
-            type_name = (raw_type_name or '').strip()[:150]
+        for type_index, type_item in enumerate(item.get('defect_types') or []):
+            type_name = (type_item.get('name') or '').strip()[:150]
             if not type_name:
                 continue
             type_key = type_name.casefold()
             if type_key in seen_types:
                 return jsonify({'error': f'Duplicate defect type under {name}: {type_name}'}), 400
             seen_types.add(type_key)
-            defect_type_id = type_item.get('id')
-            if defect_type_id is not None:
-                try:
-                    defect_type_id = int(defect_type_id)
-                except (TypeError, ValueError):
-                    return jsonify({'error': f'Defect type row {type_index + 1} under {name} has an invalid id.'}), 400
-            defect_type = db.session.get(InspectionDefectType, defect_type_id) if defect_type_id else None
+            defect_type = InspectionDefectType.query.get(type_item.get('id')) if type_item.get('id') else None
             if not defect_type or defect_type.component_id != component.id:
                 defect_type = InspectionDefectType.query.filter_by(component_id=component.id, name=type_name).first()
             if not defect_type:
                 defect_type = InspectionDefectType(component=component, name=type_name)
                 db.session.add(defect_type)
             defect_type.name = type_name
-            defect_type.report_name = str(type_item.get('report_name') or type_name).strip()[:150]
-            defect_type.training_class = str(type_item.get('training_class') or type_name).strip()[:150]
-            aliases = type_item.get('aliases') or []
-            severities = type_item.get('severities') or []
-            if not isinstance(aliases, list) or not isinstance(severities, list):
-                return jsonify({'error': f'Aliases and severities under {name} must be lists.'}), 400
-            defect_type.aliases_json = json.dumps([str(value).strip()[:150] for value in aliases if str(value).strip()])
-            allowed = [value for value in severities if value in {'Minor', 'Major', 'Critical'}]
+            defect_type.report_name = (type_item.get('report_name') or type_name).strip()[:150]
+            defect_type.training_class = (type_item.get('training_class') or type_name).strip()[:150]
+            defect_type.aliases_json = json.dumps([str(value).strip()[:150] for value in (type_item.get('aliases') or []) if str(value).strip()])
+            allowed = [value for value in (type_item.get('severities') or []) if value in {'Minor', 'Major', 'Critical'}]
             defect_type.severities_json = json.dumps(allowed or ['Minor', 'Major', 'Critical'])
-            annotation_method = str(type_item.get('annotation_method') or 'box').strip().lower()
-            if annotation_method not in {'box', 'polygon', 'circle'}:
-                return jsonify({'error': f'Unsupported annotation method under {name}.'}), 400
-            defect_type.annotation_method = annotation_method
+            defect_type.annotation_method = (type_item.get('annotation_method') or 'box')[:20]
             defect_type.active = type_item.get('active') is not False
             defect_type.display_order = type_index
 
@@ -428,8 +504,40 @@ def api_activity_log():
     guard = _require_admin()
     if guard:
         return guard
-    entries = ActivityLog.query.order_by(ActivityLog.created_at.desc()).limit(200).all()
-    return jsonify({'entries': [e.to_dict() for e in entries]})
+    try:
+        page = max(1, int(request.args.get('page') or 1))
+        per_page = min(50, max(10, int(request.args.get('per_page') or 20)))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid pagination values.'}), 400
+    category = (request.args.get('category') or 'all').strip().casefold()
+    search = (request.args.get('search') or '').strip()[:120]
+    query = ActivityLog.query
+    category_terms = {
+        'uploads': ('upload', 'batch', 'photo'),
+        'reviews': ('review', 'inspection', 'summary'),
+        'defects': ('defect', 'resolution', 'rectif'),
+        'users': ('user', 'login', 'logout', 'password'),
+        'deletions': ('delete', 'remove'),
+    }
+    if category in category_terms:
+        terms = category_terms[category]
+        clauses = []
+        for term in terms:
+            pattern = f'%{term}%'
+            clauses.extend((ActivityLog.action.ilike(pattern), ActivityLog.entity_type.ilike(pattern),
+                            ActivityLog.details.ilike(pattern)))
+        query = query.filter(db.or_(*clauses))
+    if search:
+        pattern = f'%{search}%'
+        query = query.filter(db.or_(ActivityLog.entity_name.ilike(pattern),
+                                    ActivityLog.performed_by.ilike(pattern),
+                                    ActivityLog.module.ilike(pattern), ActivityLog.details.ilike(pattern)))
+    total = query.count()
+    entries = (query.order_by(ActivityLog.created_at.desc(), ActivityLog.id.desc())
+               .offset((page - 1) * per_page).limit(per_page).all())
+    return jsonify({'entries': [entry.to_dict() for entry in entries], 'page': page,
+                    'per_page': per_page, 'total': total,
+                    'has_more': page * per_page < total})
 
 
 # ── Active users / login details ──────────────────────────────────────────────
@@ -453,6 +561,9 @@ def api_all_projects():
 
     rows = []
     for p in Project.query.order_by(Project.created_at.desc()).all():
+        division_count = len(p.divisions)
+        line_count = sum(len(division.lines) for division in p.divisions)
+        tower_count = sum(int(line.tower_count or 0) for division in p.divisions for line in division.lines)
         rows.append({
             'id': p.id,
             'module': p.module,
@@ -460,7 +571,10 @@ def api_all_projects():
             'detail': f'{p.state}, {p.country}' if p.state or p.country else (p.email or '—'),
             'created_at': p.created_at.strftime('%d %b %Y') if p.created_at else '—',
             'delete_url': f'/api/projects/{p.id}',
-            'open_url': None,  # generic projects route to their module listing, not a single page
+            'open_url': f'/projects/{p.id}/divisions',
+            'division_count': division_count,
+            'line_count': line_count,
+            'tower_count': tower_count,
         })
     rows.sort(key=lambda r: r['created_at'], reverse=True)
     return jsonify({'projects': rows})
@@ -604,7 +718,7 @@ def api_dashboard_live_load_history():
     guard = _require_admin()
     if guard:
         return guard
-    from load_monitor import get_snapshot_history
+    from load_monitor_shared import get_snapshot_history
     return jsonify({'history': get_snapshot_history()})
 
 
@@ -613,7 +727,7 @@ def api_dashboard_live_load():
     guard = _require_admin()
     if guard:
         return guard
-    from load_monitor import get_live_stats
+    from load_monitor_shared import get_live_stats
     return jsonify(get_live_stats())
 
 
@@ -691,12 +805,10 @@ def api_dashboard_summary():
     activity_trend = [{'label': d.strftime('%a'), 'count': day_counts[d.isoformat()]} for d in day_labels]
 
     # Operational project progress follows the real workflow:
-    # Admin uploads -> SME inspects images -> SME marks Inspection Done -> Client sees.
+    # Admin uploads -> SME reviews -> SME marks Inspection Done -> Client sees.
     # There is deliberately no Admin-approval stage and Pilot uploads are not
     # counted because Admin owns all application uploads.
     project_progress = []
-    total_inspection_not_done = 0
-    total_inspection_done = 0
     for project in Project.query.order_by(Project.created_at.desc()).all():
         line_ids = [
             row[0] for row in
@@ -736,10 +848,8 @@ def api_dashboard_summary():
 
         photographed = len(photographed_rows)
         inspected = len(inspected_rows)
-        inspection_not_done_uploaded = max(0, photographed - inspected)
+        review_pending = max(0, photographed - inspected)
         not_captured = max(0, total_towers - photographed)
-        total_inspection_not_done += max(0, total_towers - inspected)
-        total_inspection_done += inspected
         completion_pct = round(inspected / total_towers * 100) if total_towers else 0
         project_progress.append({
             'id': project.id,
@@ -749,7 +859,7 @@ def api_dashboard_summary():
             'not_captured': not_captured,
             'admin_uploaded_towers': photographed,
             'photos_uploaded': photos_uploaded,
-            'inspection_not_done_uploaded': inspection_not_done_uploaded,
+            'sme_review_pending': review_pending,
             'inspection_done': inspected,
             'client_visible': inspected,
             'open_defects': open_defects,
@@ -774,8 +884,6 @@ def api_dashboard_summary():
         'needs_attention': {
             'open_critical_defects': open_critical,
             'towers_pending_photos': towers_pending,
-            'inspection_not_done': total_inspection_not_done,
-            'inspection_done': total_inspection_done,
         },
         'recent_activity': [e.to_dict() for e in recent],
         'activity_trend': activity_trend,

@@ -1,20 +1,23 @@
 """Admin-only data health checks and recoverable application backups."""
 import hashlib
+import csv
+import io
 import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import threading
 import uuid
 import zipfile
 from datetime import datetime
 
-from flask import Blueprint, current_app, jsonify, request, send_file, session
+from flask import Blueprint, current_app, jsonify, request, send_file, session, Response
 from sqlalchemy import text
 
 from models import (
     ActivityLog, Announcement, CorridorPhoto, DefectResolutionEvent, Division,
-    Line, Project, TowerDefect, TowerPhoto, TowerReport, User, db,
+    BackgroundJob, Line, Project, TowerDefect, TowerPhoto, TowerReport, User, db,
 )
 
 
@@ -57,10 +60,27 @@ def _write_job(job, app=None):
         with open(temporary, 'w', encoding='utf-8') as handle:
             json.dump(job, handle, indent=2)
         os.replace(temporary, path)
+    background_id = job.get('background_job_id')
+    if background_id:
+        background = db.session.get(BackgroundJob, background_id)
+        if background:
+            background.progress_current = max(0, min(100, int(job.get('progress') or 0)))
+            background.progress_total = 100
+            background.heartbeat_at = datetime.utcnow()
+            db.session.commit()
 
 
 def _recover_interrupted_job(job, app=None):
     """A non-terminal job from another process cannot still be running."""
+    if job and job.get('background_job_id'):
+        background = db.session.get(BackgroundJob, job['background_job_id'])
+        if background and background.status in {'Queued', 'Processing'}:
+            return job
+        if background and background.status == 'Failed' and job.get('status') not in {'Completed', 'Failed'}:
+            job.update(status='Failed', finished_at=datetime.utcnow().isoformat() + 'Z',
+                       error=background.error_message or 'The persistent worker could not complete this backup.')
+            _write_job(job, app)
+            return job
     if (job and job.get('status') not in {'Completed', 'Failed'}
             and job.get('process_id') != _process_id):
         job.update(status='Failed', finished_at=datetime.utcnow().isoformat() + 'Z',
@@ -83,17 +103,12 @@ def _normalise_stored_path(value):
 
 
 def _tracked_upload_paths():
-    """Return required evidence, all known paths, and optional thumbnails.
-
-    Raw tower images deliberately removed after a preserved defect copy exists
-    are known paths but are no longer required. Thumbnails are regenerable and
-    therefore reported separately rather than as lost inspection evidence.
-    """
-    required, known, thumbnails = set(), set(), set()
+    tracked = set()
     fields = [
         (Project, ('logo_path', 'legacy_banner')),
         (Line, ('kml_path',)),
         (CorridorPhoto, ('image_path', 'thumbnail_path')),
+        (TowerPhoto, ('image_path', 'thumbnail_path', 'defect_copy_path')),
         (TowerReport, ('report_path',)),
         (DefectResolutionEvent, ('evidence_image_path',)),
         (Announcement, ('image_path',)),
@@ -104,44 +119,36 @@ def _tracked_upload_paths():
             for name in names:
                 value = _normalise_stored_path(getattr(row, name, ''))
                 if value.startswith('uploads/'):
-                    known.add(value)
-                    if name == 'thumbnail_path':
-                        thumbnails.add(value)
-                    else:
-                        required.add(value)
-    for photo in TowerPhoto.query.all():
-        raw = _normalise_stored_path(photo.image_path)
-        preserved = _normalise_stored_path(photo.defect_copy_path)
-        thumbnail = _normalise_stored_path(photo.thumbnail_path)
-        for value in (raw, preserved, thumbnail):
-            if value.startswith('uploads/'):
-                known.add(value)
-        if raw.startswith('uploads/') and not photo.raw_deleted:
-            required.add(raw)
-        if preserved.startswith('uploads/'):
-            required.add(preserved)
-        if thumbnail.startswith('uploads/'):
-            thumbnails.add(thumbnail)
-    return required, known, thumbnails
+                    tracked.add(value)
+    return tracked
+
+
+def _tracked_upload_references():
+    fields = [
+        (Project, ('logo_path', 'legacy_banner')), (Line, ('kml_path',)),
+        (CorridorPhoto, ('image_path', 'thumbnail_path')),
+        (TowerPhoto, ('image_path', 'thumbnail_path', 'defect_copy_path')),
+        (TowerReport, ('report_path',)), (DefectResolutionEvent, ('evidence_image_path',)),
+        (Announcement, ('image_path',)), (User, ('photo_path',)),
+    ]
+    for model, names in fields:
+        for row in model.query.all():
+            for field in names:
+                key = _normalise_stored_path(getattr(row, field, ''))
+                if key.startswith('uploads/'):
+                    yield model.__tablename__, row, field, key
+
+
+def _file_category(key):
+    parts = (key or '').split('/')
+    return parts[1] if len(parts) > 2 else 'other'
 
 
 def _upload_inventory(app):
-    root = os.path.join(app.static_folder, 'uploads')
-    files, total_bytes = [], 0
-    if not os.path.isdir(root):
-        return files, total_bytes
-    for folder, dirs, names in os.walk(root):
-        dirs.sort()
-        names.sort()
-        for name in names:
-            path = os.path.join(folder, name)
-            try:
-                size = os.path.getsize(path)
-            except OSError:
-                continue
-            relative = 'uploads/' + os.path.relpath(path, root).replace(os.sep, '/')
-            files.append((path, relative, size))
-            total_bytes += size
+    from storage_service import get_storage
+    storage = get_storage()
+    files = [(None, item['key'], item['size']) for item in storage.inventory()]
+    total_bytes = sum(item[2] for item in files)
     return files, total_bytes
 
 
@@ -161,14 +168,64 @@ def _sqlite_database_path():
     return os.path.abspath(database) if database else ''
 
 
+def _postgres_backup_available():
+    return db.engine.url.get_backend_name().startswith('postgresql') and bool(shutil.which('pg_dump'))
+
+
+def _snapshot_postgresql(destination):
+    """Create a custom-format dump without placing the password in argv."""
+    executable = shutil.which('pg_dump')
+    if not executable:
+        raise ValueError('pg_dump is not installed or is not available in PATH.')
+    url = db.engine.url
+    command = [executable, '--format=custom', '--no-owner', '--no-privileges',
+               '--file', destination]
+    if url.host:
+        command.extend(['--host', url.host])
+    if url.port:
+        command.extend(['--port', str(url.port)])
+    if url.username:
+        command.extend(['--username', url.username])
+    if url.database:
+        command.extend(['--dbname', url.database])
+    environment = os.environ.copy()
+    if url.password:
+        environment['PGPASSWORD'] = url.password
+    sslmode = url.query.get('sslmode') if url.query else None
+    if sslmode:
+        environment['PGSSLMODE'] = str(sslmode)
+    completed = subprocess.run(command, env=environment, capture_output=True, text=True,
+                               timeout=60 * 60, check=False)
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or 'pg_dump failed').strip()
+        raise ValueError(f'PostgreSQL backup failed: {message[:800]}')
+    if not os.path.isfile(destination) or os.path.getsize(destination) == 0:
+        raise ValueError('pg_dump completed without creating a usable backup file.')
+
+
 def _health_payload(app):
     upload_files, upload_bytes = _upload_inventory(app)
     actual = {relative for _path, relative, _size in upload_files}
-    required, known, thumbnails = _tracked_upload_paths()
-    missing = sorted(required - actual)
-    untracked = sorted(actual - known)
-    missing_thumbnail_paths = sorted(thumbnails - actual)
-    missing_thumbnails = len(missing_thumbnail_paths)
+    tracked = _tracked_upload_paths()
+    missing = sorted(tracked - actual)
+    untracked = sorted(actual - tracked)
+    missing_by_category = {}
+    for key in missing:
+        category = _file_category(key)
+        missing_by_category[category] = missing_by_category.get(category, 0) + 1
+    untracked_by_name = {}
+    for key in untracked:
+        untracked_by_name.setdefault(os.path.basename(key).casefold(), []).append(key)
+    relink_suggestions = []
+    for old_key in missing:
+        matches = untracked_by_name.get(os.path.basename(old_key).casefold(), [])
+        if len(matches) == 1:
+            relink_suggestions.append({'missing': old_key, 'candidate': matches[0],
+                                       'category': _file_category(old_key)})
+    missing_thumbnails = sum(
+        1 for photo in TowerPhoto.query.filter(TowerPhoto.thumbnail_path.isnot(None)).all()
+        if _normalise_stored_path(photo.thumbnail_path) not in actual
+    )
     database_path = _sqlite_database_path()
     database_ok = bool(database_path and os.path.isfile(database_path)) if database_path else True
     disk = shutil.disk_usage(app.instance_path)
@@ -182,12 +239,15 @@ def _health_payload(app):
     if not database_ok:
         issues.append('The SQLite database file could not be found.')
     backend = db.engine.url.get_backend_name()
+    snapshot_supported = backend == 'sqlite' or _postgres_backup_available()
+    if backend.startswith('postgresql') and not snapshot_supported:
+        issues.append('PostgreSQL is configured but pg_dump is unavailable on this server.')
     return {
         'status': 'Attention required' if issues else 'Healthy',
         'checked_at': datetime.utcnow().isoformat() + 'Z',
         'database': {
             'backend': backend,
-            'snapshot_supported': backend == 'sqlite',
+            'snapshot_supported': snapshot_supported,
             'available': database_ok,
             'migration_revision': _schema_revision(),
         },
@@ -199,10 +259,12 @@ def _health_payload(app):
         },
         'files': {
             'upload_count': len(upload_files), 'upload_bytes': upload_bytes,
-            'upload_size': _format_bytes(upload_bytes), 'tracked_count': len(known),
+            'upload_size': _format_bytes(upload_bytes), 'tracked_count': len(tracked),
             'missing_count': len(missing), 'missing_examples': missing[:50],
+            'missing_by_category': missing_by_category,
             'untracked_count': len(untracked), 'untracked_examples': untracked[:50],
             'missing_thumbnail_count': missing_thumbnails,
+            'relink_suggestions': relink_suggestions[:100],
         },
         'disk': {'free_bytes': disk.free, 'free': _format_bytes(disk.free)},
         'issues': issues,
@@ -230,25 +292,33 @@ def _snapshot_sqlite(source, destination):
 def _run_backup(app, job_id, actor, pre_upgrade):
     with app.app_context():
         job = _read_job(job_id, app)
-        snapshot_path = os.path.join(_backup_root(app), f'{job_id}.sqlite.tmp')
+        snapshot_path = os.path.join(_backup_root(app), f'{job_id}.database.tmp')
         zip_path = ''
         try:
             job.update(status='Checking data', progress=2)
             _write_job(job, app)
             health = _health_payload(app)
+            backend = db.engine.url.get_backend_name()
             database_path = _sqlite_database_path()
-            if not database_path or not os.path.isfile(database_path):
-                raise ValueError('Automatic database snapshots currently require the local SQLite database. Use your database server backup tool first.')
+            if backend == 'sqlite' and (not database_path or not os.path.isfile(database_path)):
+                raise ValueError('The local SQLite database file could not be found.')
+            if backend != 'sqlite' and not backend.startswith('postgresql'):
+                raise ValueError(f'Automatic snapshots are not supported for {backend}.')
             upload_files, upload_bytes = _upload_inventory(app)
-            estimated = upload_bytes + os.path.getsize(database_path)
+            database_bytes = os.path.getsize(database_path) if database_path else 0
+            estimated = upload_bytes + database_bytes
             free = shutil.disk_usage(_backup_root(app)).free
             if estimated > free * .92:
                 raise ValueError(f'Not enough free disk space. Approximately {_format_bytes(estimated)} is required.')
 
             job.update(status='Snapshotting database', progress=5)
             _write_job(job, app)
-            _snapshot_sqlite(database_path, snapshot_path)
-            database_name = os.path.basename(database_path) or 'application.sqlite'
+            if backend == 'sqlite':
+                _snapshot_sqlite(database_path, snapshot_path)
+                database_name = os.path.basename(database_path) or 'application.sqlite'
+            else:
+                _snapshot_postgresql(snapshot_path)
+                database_name = 'application_postgresql.dump'
             timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
             kind = 'pre_upgrade' if pre_upgrade else 'manual'
             filename = f'drogo_{kind}_backup_{timestamp}_{job_id[:8]}.zip'
@@ -256,7 +326,7 @@ def _run_backup(app, job_id, actor, pre_upgrade):
             manifest = {
                 'format_version': 1, 'created_at': datetime.utcnow().isoformat() + 'Z',
                 'created_by': actor, 'backup_type': kind,
-                'database_backend': 'sqlite', 'migration_revision': health['database']['migration_revision'],
+                'database_backend': backend, 'migration_revision': health['database']['migration_revision'],
                 'database_file': f'instance/{database_name}',
                 'database_sha256': _sha256(snapshot_path),
                 'upload_count': len(upload_files), 'upload_bytes': upload_bytes,
@@ -275,8 +345,11 @@ def _run_backup(app, job_id, actor, pre_upgrade):
             with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
                 archive.write(snapshot_path, f'instance/{database_name}')
                 completed = 1
-                for path, relative, _size in upload_files:
-                    archive.write(path, f'static/{relative}')
+                from storage_service import get_storage
+                storage = get_storage()
+                for _path, relative, _size in upload_files:
+                    with storage.materialize(relative) as materialized:
+                        archive.write(materialized, f'static/{relative}')
                     completed += 1
                     if completed % 25 == 0:
                         job['progress'] = 10 + int(completed / total_items * 82)
@@ -287,7 +360,8 @@ def _run_backup(app, job_id, actor, pre_upgrade):
                 archive.writestr('RESTORE_README.txt',
                     'DROGO application data backup.\n\n'
                     'Stop the application before restoring. Extract static/uploads into the new application.\n'
-                    f'For SQLite, restore instance/{database_name} into the new application and then run:\n'
+                    f'Database backend: {backend}. Database file: instance/{database_name}.\n'
+                    'For PostgreSQL, restore the custom dump with pg_restore. For SQLite, restore the database file.\n'
                     'python -m flask --app app db upgrade\n\n'
                     'The .env file is intentionally not included. Copy it separately from a trusted location.\n')
             with zipfile.ZipFile(zip_path, 'r') as archive:
@@ -323,6 +397,61 @@ def data_health():
     return jsonify(_health_payload(current_app))
 
 
+@backup_bp.route('/api/settings/data-health/issues.csv')
+def data_health_issues_csv():
+    guard = _admin_guard()
+    if guard:
+        return guard
+    payload = _health_payload(current_app)
+    upload_files, _upload_bytes = _upload_inventory(current_app)
+    actual = {relative for _path, relative, _size in upload_files}
+    tracked = _tracked_upload_paths()
+    missing_all = sorted(tracked - actual)
+    untracked_all = sorted(actual - tracked)
+    output = io.StringIO(); writer = csv.writer(output)
+    writer.writerow(['issue_type', 'category', 'stored_path', 'suggested_candidate'])
+    suggestions = {row['missing']: row['candidate'] for row in payload['files']['relink_suggestions']}
+    for key in missing_all:
+        writer.writerow(['missing_database_linked_file', _file_category(key), key, suggestions.get(key, '')])
+    for key in untracked_all:
+        writer.writerow(['untracked_stored_file', _file_category(key), key, ''])
+    writer.writerow(['missing_thumbnails', 'thumbnails', payload['files']['missing_thumbnail_count'], 'Regenerate in Settings'])
+    return Response(output.getvalue(), mimetype='text/csv', headers={
+        'Content-Disposition': f'attachment; filename=data_health_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.csv'})
+
+
+@backup_bp.route('/api/settings/data-health/relink', methods=['POST'])
+def data_health_relink():
+    """Apply one conservative relink where the exact basename has one candidate."""
+    guard = _admin_guard()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        from storage_service import normalize_key
+        missing_key = normalize_key(payload.get('missing'))
+        candidate = normalize_key(payload.get('candidate'))
+    except ValueError:
+        return jsonify({'error': 'Both paths must be safe upload paths.'}), 400
+    health = _health_payload(current_app)
+    suggestion = next((row for row in health['files']['relink_suggestions']
+                       if row['missing'] == missing_key and row['candidate'] == candidate), None)
+    if not suggestion:
+        return jsonify({'error': 'This is no longer a unique safe relink suggestion. Run Data Health again.'}), 409
+    changed = []
+    for table, row, field, key in _tracked_upload_references():
+        if key != missing_key:
+            continue
+        setattr(row, field, candidate); changed.append({'table': table, 'id': row.id, 'field': field})
+    if not changed:
+        return jsonify({'error': 'No current database reference uses the missing path.'}), 409
+    ActivityLog.log(action='relink', entity_type='StoredFile', entity_name=os.path.basename(candidate),
+                    performed_by=session.get('user_name', ''), role=session.get('role', ''),
+                    details=f'{missing_key} -> {candidate}; {len(changed)} reference(s)')
+    db.session.commit()
+    return jsonify({'ok': True, 'changed': changed, 'missing': missing_key, 'candidate': candidate})
+
+
 @backup_bp.route('/api/settings/backups', methods=['POST'])
 def create_backup():
     guard = _admin_guard()
@@ -336,14 +465,17 @@ def create_backup():
     payload = request.get_json(silent=True) or {}
     job_id = uuid.uuid4().hex
     pre_upgrade = bool(payload.get('pre_upgrade'))
+    actor = session.get('user_name', 'Admin')
+    from background_jobs import enqueue
+    background = enqueue('application_backup', {
+        'job_id': job_id, 'actor': actor, 'pre_upgrade': pre_upgrade,
+    }, session.get('user_id'), actor)
     job = {'id': job_id, 'status': 'Queued', 'progress': 0,
            'created_at': datetime.utcnow().isoformat() + 'Z',
-           'created_by': session.get('user_name', 'Admin'),
+           'created_by': actor,
            'backup_type': 'Pre-upgrade' if pre_upgrade else 'Manual',
-           'process_id': _process_id, 'error': ''}
+           'process_id': _process_id, 'background_job_id': background.id, 'error': ''}
     _write_job(job)
-    app = current_app._get_current_object()
-    threading.Thread(target=_run_backup, args=(app, job_id, job['created_by'], pre_upgrade), daemon=True).start()
     return jsonify(job), 202
 
 
@@ -403,4 +535,9 @@ def delete_backup(job_id):
         path = os.path.abspath(os.path.join(root, name))
         if os.path.commonpath([root, path]) == root and os.path.isfile(path):
             os.remove(path)
+    if job.get('background_job_id'):
+        background = db.session.get(BackgroundJob, job['background_job_id'])
+        if background:
+            db.session.delete(background)
+            db.session.commit()
     return jsonify({'deleted': True})

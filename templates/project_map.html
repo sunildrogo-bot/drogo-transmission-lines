@@ -720,6 +720,8 @@
             <option value="Top">Top</option>
             <option value="Middle">Middle</option>
             <option value="Bottom">Bottom</option>
+            <option value="Left">Left</option>
+            <option value="Right">Right</option>
           </select>
         </div>
         <div class="field">
@@ -785,6 +787,19 @@
           <select id="df-status">
             <option value="OK">OK</option>
             <option value="Missing">Missing</option>
+            <option value="Damaged">Damaged</option>
+            <option value="Loose">Loose</option>
+            <option value="Broken">Broken</option>
+            <option value="Cracked">Cracked</option>
+            <option value="Corroded">Corroded</option>
+            <option value="Bent">Bent</option>
+            <option value="Displaced">Displaced</option>
+            <option value="Deformed">Deformed</option>
+            <option value="Burnt">Burnt</option>
+            <option value="Contaminated">Contaminated</option>
+            <option value="Not Connected">Not Connected</option>
+            <option value="Needs Attention">Needs Attention</option>
+            <option value="Not Applicable">Not Applicable</option>
           </select>
         </div>
         <div class="field">
@@ -987,10 +1002,10 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://unpkg.com/@mapbox/togeojson@0.16.0/togeojson.js"></script>
+<script src="{{ url_for('static', filename='vendor/togeojson/togeojson.js') }}"></script>
 <script src="https://unpkg.com/exif-js@2.3.0/exif.js"></script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
-<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.css') }}"/>
+<script src="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.js') }}"></script>
 <script>
 const PROJECT_ID = {{ project.id }};
 const SELECTED_DIVISION_ID = {{ selected_division.id }};
@@ -1106,10 +1121,7 @@ async function handleDeepLinkedLine() {
 
 function initMap() {
   pmMap = L.map('pm-map').setView([22.9, 86.5], 7);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
-    maxZoom: 19
-  }).addTo(pmMap);
+  window.addDrogoBaseLayer(pmMap);
   const saved = sessionStorage.getItem(`drogo-map-state:${PROJECT_ID}:${SELECTED_DIVISION_ID}`);
   if (saved) {
     try { const state = JSON.parse(saved); if (state.lat != null && state.lng != null && state.zoom != null) pmMap.setView([state.lat, state.lng], state.zoom); } catch (e) { /* ignore stale state */ }
@@ -1266,8 +1278,8 @@ function toggleLine(divisionId, line, key) {
 function renderLineOnMap(divisionId, line, key, refit = true) {
   const division = DIVISIONS[divisionId];
   const group = L.layerGroup();
-  const isKml = line.kml_url && /\.kml$/i.test(line.kml_url);
-  const isKmz = line.kml_url && /\.kmz$/i.test(line.kml_url);
+  const isKml = line.kml_url && /\.(kml|kmz)$/i.test(line.kml_url);
+  const isKmz = false; // KMZ is converted by the server-side GeoJSON cache.
 
   if (isKmz) {
     // .kmz is a zipped KML — this app can't unzip it in the browser, so it
@@ -1316,25 +1328,18 @@ function renderLineOnMap(divisionId, line, key, refit = true) {
 const KML_CACHE = {};   // line.id -> Promise<{ geojson, lengthKm, bounds }>
 
 function loadKmlForLine(line) {
-  if (!line.kml_url || !/\.kml$/i.test(line.kml_url)) return Promise.resolve(null);
+  if (!line.kml_url || !/\.(kml|kmz)$/i.test(line.kml_url)) return Promise.resolve(null);
   if (KML_CACHE[line.id]) return KML_CACHE[line.id];
 
-  KML_CACHE[line.id] = fetch(line.kml_url)
+  const preparedUrl = line.geojson_url || `/api/lines/${line.id}/geojson`;
+  KML_CACHE[line.id] = fetch(preparedUrl)
     .then(r => {
-      if (!r.ok) throw new Error(`KML fetch failed: ${r.status} ${r.statusText} (${line.kml_url})`);
-      return r.text();
+      if (!r.ok) throw new Error(`Prepared map fetch failed: ${r.status} ${r.statusText}`);
+      return r.json();
     })
-    .then(text => {
-      if (typeof toGeoJSON === 'undefined') {
-        throw new Error('togeojson library failed to load (check network/CDN access to unpkg.com).');
-      }
-      const xml = new DOMParser().parseFromString(text, 'text/xml');
-      const parseError = xml.querySelector('parsererror');
-      if (parseError) throw new Error(`KML XML could not be parsed: ${parseError.textContent.slice(0, 200)}`);
-
-      const geojson = toGeoJSON.kml(xml);
+    .then(geojson => {
       if (!geojson || !geojson.features || !geojson.features.length) {
-        throw new Error('KML parsed but contained no usable features (no LineString/Point geometry found).');
+        throw new Error('Prepared map contains no usable LineString/Point geometry.');
       }
 
       let lengthKm = 0;
@@ -1569,9 +1574,7 @@ async function openKmlEditModal(line) {
   if (kmlEditMap) { kmlEditMap.remove(); kmlEditMap = null; }
   kmlEditMap = L.map('kml-edit-map', { zoomControl: false });
   L.control.zoom({ position: 'bottomleft' }).addTo(kmlEditMap); // out of the way of the Draw toolbar (topright)
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors', maxZoom: 19,
-  }).addTo(kmlEditMap);
+  window.addDrogoBaseLayer(kmlEditMap);
 
   kmlEditFeatureGroup = new L.FeatureGroup();
   kmlEditMap.addLayer(kmlEditFeatureGroup);
@@ -2219,6 +2222,27 @@ function readImageGps(file) {
 
 const TOWER_MATCH_BUFFER_M = 70;
 
+async function inspectLocalUploadFile(file) {
+  const stem = file.name.replace(/\.[^.]+$/, '');
+  const mediaType = /_T(_\S+)?$/i.test(stem) ? 'thermal' : 'rgb';
+  if (!PROJECT_INSPECTION_TYPES.includes(mediaType)) {
+    return {valid:false, status:'Wrong Type', mediaType, error:`${mediaType.toUpperCase()} is not enabled for this project.`};
+  }
+  try {
+    let width = 0, height = 0;
+    if (window.createImageBitmap) {
+      const bitmap = await createImageBitmap(file);
+      width = bitmap.width; height = bitmap.height; bitmap.close();
+    }
+    const warnings = [];
+    if (width && height && (width < 640 || height < 480)) warnings.push(`Low resolution ${width}×${height}`);
+    if (mediaType === 'thermal') warnings.push('Radiometric data is confirmed when temperature measurement is used');
+    return {valid:true, status:warnings.length ? 'Warning' : 'Ready', mediaType, width, height, warnings};
+  } catch (e) {
+    return {valid:false, status:'Invalid', mediaType, error:'Browser could not decode this image.'};
+  }
+}
+
 async function handleFolderSelected(inputEl, lineId) {
   const allFiles = Array.from(inputEl.files || [])
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
@@ -2232,13 +2256,42 @@ async function handleFolderSelected(inputEl, lineId) {
 
   // Videos and any non-image file are simply left out — not an error,
   // just not something this flow touches.
-  const imageFiles = allFiles.filter(f => isImageFile(f.name));
-  if (!imageFiles.length) {
+  const candidateImageFiles = allFiles.filter(f => isImageFile(f.name));
+  if (!candidateImageFiles.length) {
     progressBox.innerHTML = `<div class="tw-folder-progress">No images found in that folder (only image files are used — videos and other files are skipped).</div>`;
     return;
   }
+  const imageFiles = [];
+  let validationWarnings = 0, validationInvalid = 0;
+  for (let i = 0; i < candidateImageFiles.length; i++) {
+    progressBox.innerHTML = `<div class="tw-folder-progress">Validating image quality… ${i + 1}/${candidateImageFiles.length}</div>`;
+    const file = candidateImageFiles[i];
+    const check = await inspectLocalUploadFile(file);
+    if (!check.valid) {
+      validationInvalid++;
+      recordUploadOutcome(file, check.status, check.error || 'Image validation failed.');
+    } else {
+      if (check.warnings.length) validationWarnings++;
+      file._drogoValidation = check;
+      imageFiles.push(file);
+    }
+  }
+  if (!imageFiles.length) {
+    progressBox.innerHTML = `<div class="tw-folder-progress">All ${candidateImageFiles.length} image(s) failed validation. Nothing was uploaded.</div>`;
+    activeBulkUpload = null;
+    return;
+  }
+  const proceed = await showConfirm(
+    `${candidateImageFiles.length} images checked: ${imageFiles.length} ready, ${validationWarnings} with warnings, ${validationInvalid} rejected. Continue with GPS/tower matching and upload?`,
+    'Continue Upload'
+  );
+  if (!proceed) {
+    progressBox.innerHTML = '<div class="tw-folder-progress">Upload cancelled before any files were stored.</div>';
+    activeBulkUpload = null;
+    return;
+  }
   try {
-    const batch = await createUploadBatch(lineId, imageFiles);
+    const batch = await createUploadBatch(lineId, candidateImageFiles);
     activeBulkUpload.batchId = batch.id;
     await syncUploadBatch('Preparing');
   } catch (e) {
@@ -2534,23 +2587,50 @@ function downloadTowerReport(reportId) {
   window.location.href = `/api/tower-reports/${reportId}/download`;
 }
 
+let towerPhotosAbortController = null;
+let towerPhotosRequestSerial = 0;
 async function loadTowerPhotos() {
   const grid = document.getElementById('tp-photo-grid');
   if (!currentTowerLine || !currentTowerLabel) return;
+  if (towerPhotosAbortController) towerPhotosAbortController.abort();
+  towerPhotosAbortController = new AbortController();
+  const requestSerial = ++towerPhotosRequestSerial;
+  const requestedLine = currentTowerLine.id;
+  const requestedTower = currentTowerLabel;
   grid.innerHTML = '<div class="tp-photo-empty">Loading…</div>';
   try {
     if (CAN_INSPECT) {
-      const res = await fetch(`/api/lines/${currentTowerLine.id}/tower-photos?tower=${encodeURIComponent(currentTowerLabel)}`);
+      const pageUrl = afterId => `/api/lines/${requestedLine}/tower-photos?tower=${encodeURIComponent(requestedTower)}&per_page=120${afterId ? `&after_id=${afterId}` : ''}`;
+      const res = await fetch(pageUrl(0), {signal:towerPhotosAbortController.signal});
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not load tower photos.');
+      if (requestSerial !== towerPhotosRequestSerial || requestedLine !== currentTowerLine.id || requestedTower !== currentTowerLabel) return;
       renderTowerPhotos(data.photos || []);
+      // Continue from the server cursor. Only 48 thumbnails are rendered at
+      // once, but every image remains available to filters and lightbox
+      // navigation even when a tower contains more than the old 500 cap.
+      let allPhotos = data.photos || [];
+      let hasMore = Boolean(data.has_more);
+      let afterId = data.next_after_id;
+      while (hasMore && afterId) {
+        const nextRes = await fetch(pageUrl(afterId), {signal:towerPhotosAbortController.signal});
+        const nextData = await nextRes.json();
+        if (!nextRes.ok) throw new Error(nextData.error || 'Could not load the next photo page.');
+        if (requestSerial !== towerPhotosRequestSerial || requestedLine !== currentTowerLine.id || requestedTower !== currentTowerLabel) return;
+        allPhotos = allPhotos.concat(nextData.photos || []);
+        currentTowerPhotos = allPhotos;
+        hasMore = Boolean(nextData.has_more);
+        afterId = nextData.next_after_id;
+      }
+      if (allPhotos.length !== (data.photos || []).length) renderTowerPhotos(allPhotos);
     } else {
       // Client only ever sees ANNOTATED photos — RGB with at least one
       // marked defect, thermal with at least one measured point. A clean/
       // unmarked photo of either kind is excluded, same rule for both
       // now: no defects list a photo → nothing to show a client there.
       const [defectsRes, thermalRes] = await Promise.all([
-        fetch(`/api/lines/${currentTowerLine.id}/tower-defects-flat?tower=${encodeURIComponent(currentTowerLabel)}`),
-        fetch(`/api/lines/${currentTowerLine.id}/tower-thermal-points-flat?tower=${encodeURIComponent(currentTowerLabel)}`),
+        fetch(`/api/lines/${requestedLine}/tower-defects-flat?tower=${encodeURIComponent(requestedTower)}`, {signal:towerPhotosAbortController.signal}),
+        fetch(`/api/lines/${requestedLine}/tower-thermal-points-flat?tower=${encodeURIComponent(requestedTower)}`, {signal:towerPhotosAbortController.signal}),
       ]);
       const defectsData = await defectsRes.json();
       const thermalData = await thermalRes.json();
@@ -2579,6 +2659,7 @@ async function loadTowerPhotos() {
       renderTowerPhotos(entries);
     }
   } catch (e) {
+    if (e.name === 'AbortError') return;
     grid.innerHTML = '<div class="tp-photo-empty">Could not load photos.</div>';
   }
 }
@@ -2680,6 +2761,7 @@ function openPhotoLightbox(index) {
   currentPhotoIndex = index;
   document.getElementById('photo-lightbox').classList.add('open');
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 function closePhotoLightbox() {
@@ -2767,14 +2849,26 @@ function renderLightboxImage() {
   }
 }
 
+function prefetchAdjacentPhotos() {
+  if (currentFilteredPhotos.length < 2) return;
+  const indexes = [(currentPhotoIndex + 1) % currentFilteredPhotos.length,
+                   (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length];
+  indexes.forEach(index => {
+    const url = currentFilteredPhotos[index]?.image_url;
+    if (url) { const image = new Image(); image.decoding = 'async'; image.src = url; }
+  });
+}
+
 function lightboxNext() {
   currentPhotoIndex = (currentPhotoIndex + 1) % currentFilteredPhotos.length;
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 function lightboxPrev() {
   currentPhotoIndex = (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length;
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 document.addEventListener('keydown', (e) => {
@@ -3587,11 +3681,18 @@ const DEFECT_STATUS_OPTIONS = {
   'Tower Welding Condition': ['Good', 'Fair', 'Poor'],
   'Tree Cutting Spanwise': ['Not Required', 'Required', 'Done'],
 };
-const DEFAULT_DEFECT_STATUS_OPTIONS = ['OK', 'Missing'];
+const COMMON_DEFECT_STATUS_OPTIONS = [
+  'OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Cracked', 'Corroded',
+  'Bent', 'Displaced', 'Deformed', 'Burnt', 'Contaminated',
+  'Not Connected', 'Needs Attention', 'Not Applicable',
+];
 
 function updateDefectStatusOptions() {
   const type = document.getElementById('df-defect-type').value;
-  const options = DEFECT_STATUS_OPTIONS[type] || DEFAULT_DEFECT_STATUS_OPTIONS;
+  const preferred = DEFECT_STATUS_OPTIONS[type] || [];
+  // Keep the technically relevant answers first, then make the complete
+  // common condition list available for every defect without duplicates.
+  const options = [...new Set([...preferred, ...COMMON_DEFECT_STATUS_OPTIONS])];
   const statusSelect = document.getElementById('df-status');
   statusSelect.innerHTML = options.map(o => `<option value="${o}">${o}</option>`).join('');
 }
@@ -3703,6 +3804,7 @@ function buildKmlLayer(parsed, line, division, key) {
   const kmlGroup = L.layerGroup();
   const showNums = isLineShowingNumbers(key);
   const markersByLabel = {};
+  const pointFeatures = [];
   (parsed.geojson.features || []).forEach(feat => {
     const geom = feat.geometry;
     if (!geom) return;
@@ -3715,6 +3817,19 @@ function buildKmlLayer(parsed, line, division, key) {
         L.polyline(latlngs, { color: '#000000', weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }).addTo(kmlGroup);
       });
     } else if (geom.type === 'Point') {
+      pointFeatures.push(feat);
+    }
+  });
+
+  // Add tower markers in animation-frame batches. Large lines no longer
+  // freeze the page while thousands of DOM marker nodes are constructed.
+  let pointIndex = 0;
+  const addPointWindow = () => {
+    if (!kmlGroupsByKey[key] || kmlGroupsByKey[key] !== kmlGroup) return;
+    const end = Math.min(pointIndex + 180, pointFeatures.length);
+    for (; pointIndex < end; pointIndex++) {
+      const feat = pointFeatures[pointIndex];
+      const geom = feat.geometry, props = feat.properties || {};
       const [lng, lat] = geom.coordinates;
       const label = pickTowerLabel(props);
       const marker = L.marker([lat, lng], { icon: kmlTowerIcon() });
@@ -3730,12 +3845,14 @@ function buildKmlLayer(parsed, line, division, key) {
       marker.addTo(kmlGroup);
       markersByLabel[label] = { lat, lng };
     }
-  });
+    if (pointIndex < pointFeatures.length) requestAnimationFrame(addPointWindow);
+    else if (isLineShowingPhotoDots(key)) applyPhotoDots(line, key, kmlGroup);
+  };
   kmlGroup._towerMarkers = markersByLabel; // stashed for applyPhotoDots()
   kmlGroup._lineId = line.id;
   kmlGroup._lineKey = key;
   kmlGroupsByKey[key] = kmlGroup;
-  if (isLineShowingPhotoDots(key)) applyPhotoDots(line, key, kmlGroup);
+  requestAnimationFrame(addPointWindow);
   return kmlGroup;
 }
 

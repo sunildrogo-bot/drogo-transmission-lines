@@ -1,30 +1,33 @@
 __pycache__/
-*.py[cod]
-.pytest_cache/
+*.pyc
 
-# Production secrets and local overrides
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
 
-# Persistent database and user uploads
+# Runtime environments and application data
+.venv/
+venv/
 instance/
 static/uploads/
+.upgrade_backups/
+
+# Generated/private artifacts
 *.db
 *.sqlite
 *.sqlite3
+*.log
+*.zip
+static/maps/*.pmtiles
+*.tmp
 *.bak
-*.mdf
-*.ldf
+training_exports/
+backups/
 
-# Python environments
-venv/
-.venv/
-
-# Frontend build artifacts
-frontend/node_modules/
-frontend/dist/
-
-# OS/editor files
-.DS_Store
-Thumbs.db
+# Local tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/

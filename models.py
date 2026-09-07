@@ -8,6 +8,7 @@ Tables:
 import json
 from datetime import datetime, timedelta
 from flask_sqlalchemy import SQLAlchemy
+from storage_service import stored_url
 
 db = SQLAlchemy()
 
@@ -131,7 +132,7 @@ class User(db.Model):
             'username':   self.username,
             'email':      self.email,
             'contact':    self.contact or '',
-            'photo_url':  f'/static/{self.photo_path}' if self.photo_path else '',
+            'photo_url':  stored_url(self.photo_path),
             'roles':      self.role_names(),
             'modules':    self.module_names(),
             'status':     self.effective_status(),
@@ -291,7 +292,7 @@ class Project(db.Model):
             'email':         self.email or '',
             'country':       self.country or '',
             'state':         self.state or '',
-            'logo_url':      f'/static/{self.logo_path}' if self.logo_path else '',
+            'logo_url':      stored_url(self.logo_path),
             'client_name':       self.client_name or '',
             'planned_divisions': self.planned_divisions,
             'planned_towers':    self.planned_towers,
@@ -353,6 +354,9 @@ class Line(db.Model):
     length_km    = db.Column(db.Float, default=0)
     tower_count  = db.Column(db.Integer, default=0)
     kml_path     = db.Column(db.String(255), default='')   # relative to /static
+    # Server-generated GeoJSON cache for fast map loading. The uploaded KML
+    # remains authoritative; this file can always be regenerated.
+    geojson_path = db.Column(db.String(255), default='')
     # Used in the per-tower report's "General Information" section — set
     # once per line (a survey flight typically covers a whole line at
     # once), rather than re-entered per tower or per report.
@@ -382,7 +386,8 @@ class Line(db.Model):
             'end':         {'lat': self.end_lat,   'lng': self.end_lng},
             'length_km':   self.length_km or 0,
             'tower_count': self.tower_count or 0,
-            'kml_url':     f'/static/{self.kml_path}' if self.kml_path else '',
+            'kml_url':     stored_url(self.kml_path),
+            'geojson_url': f'/api/lines/{self.id}/geojson' if self.kml_path else '',
             'voltage_level':   self.voltage_level or '',
             'survey_date':     self.survey_date.strftime('%Y-%m-%d') if self.survey_date else '',
             'pilot_name':      self.pilot_name or '',
@@ -416,8 +421,8 @@ class CorridorPhoto(db.Model):
         return {
             'id':          self.id,
             'line_id':     self.line_id,
-            'image_url':   f'/static/{self.image_path}' if self.image_path else '',
-            'thumbnail_url': f'/static/{display_thumb}' if display_thumb else '',
+            'image_url':   stored_url(self.image_path),
+            'thumbnail_url': stored_url(display_thumb),
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
             'observation': self.observation or '',
@@ -430,7 +435,7 @@ class TowerPhoto(db.Model):
     """A photo attached to one tower point on a Line's map.
 
     Tower points themselves come from parsing the Line's KML file
-    client-side on every page load — they're not individual database rows.
+    through the server-side GeoJSON cache — they're not individual database rows.
     tower_label (the point's name/number as it appears in the KML, e.g.
     "T12") together with line_id is what stably identifies "this same
     tower" across page loads, so photos stay attached to the right point
@@ -466,10 +471,16 @@ class TowerPhoto(db.Model):
     # uploaded before this existed; to_dict() falls back to the full
     # image for those rather than showing nothing.
     thumbnail_path = db.Column(db.String(255), nullable=True)
-    # Legacy per-image review fields retained for compatibility with existing
-    # databases and audit history. The current workflow does not require a
-    # clean-image decision; SMEs browse images, mark findings when present, and
-    # use TowerInspectionStatus.inspection_done as the release decision.
+    # Additive upload-quality metadata. Legacy rows stay valid with nulls and
+    # are never reclassified automatically.
+    media_type = db.Column(db.String(20), nullable=True, index=True)
+    image_width = db.Column(db.Integer, nullable=True)
+    image_height = db.Column(db.Integer, nullable=True)
+    captured_at = db.Column(db.DateTime, nullable=True)
+    validation_status = db.Column(db.String(20), nullable=True)
+    validation_warnings_json = db.Column(db.Text, nullable=True)
+    # Explicit clean-image decision. Images with defects/measurements are
+    # completed automatically; this field records the equally valid clean case.
     review_outcome = db.Column(db.String(30), nullable=False, default='Pending', server_default='Pending')
     reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     reviewed_by_name = db.Column(db.String(120), default='')
@@ -483,6 +494,8 @@ class TowerPhoto(db.Model):
 
     def is_thermal_image(self):
         """Recognise the DJI paired-image naming convention without decoding."""
+        if self.media_type in ('rgb', 'thermal'):
+            return self.media_type == 'thermal'
         import os
         import re
         filename = os.path.basename(self.image_path or self.defect_copy_path or '')
@@ -499,9 +512,14 @@ class TowerPhoto(db.Model):
         # empty grid tile. Not fast for that one photo, but never broken.
         thumb_path = self.thumbnail_path or display_path
         thermal = self.is_thermal_image()
-        active_defects = [defect for defect in self.defects if not defect.deleted_at]
-        has_finding = bool(self.thermal_points) if thermal else bool(active_defects)
+        has_finding = bool(self.thermal_points) if thermal else bool(self.defects)
         effective_review = ('Measured' if thermal else 'Defect marked') if has_finding else (self.review_outcome or 'Pending')
+        try:
+            validation_warnings = json.loads(self.validation_warnings_json or '[]')
+            if not isinstance(validation_warnings, list):
+                validation_warnings = []
+        except (TypeError, ValueError):
+            validation_warnings = []
         return {
             'id':          self.id,
             'line_id':     self.line_id,
@@ -509,15 +527,21 @@ class TowerPhoto(db.Model):
             # Resolve the real surviving file at request time. This also
             # supports databases/uploads copied from an older app version.
             'image_url':   f'/api/tower-photos/{self.id}/image',
-            'thumbnail_url': f'/static/{thumb_path}' if thumb_path else '',
+            'thumbnail_url': stored_url(thumb_path),
             'uploaded_by': self.uploaded_by or '',
             'created_at':  self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
-            'defect_count': len(active_defects),
+            'defect_count': len(self.defects),
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
             'has_defect_copy': bool(self.defect_copy_path),
             'raw_deleted': bool(self.raw_deleted),
             'is_thermal': thermal,
+            'media_type': self.media_type or ('thermal' if thermal else 'rgb'),
+            'image_width': self.image_width,
+            'image_height': self.image_height,
+            'captured_at': self.captured_at.isoformat() + 'Z' if self.captured_at else '',
+            'validation_status': self.validation_status or 'Legacy',
+            'validation_warnings': validation_warnings,
             'review_status': effective_review,
             'review_complete': effective_review != 'Pending',
             'reviewed_by': self.reviewed_by_name or '',
@@ -672,10 +696,11 @@ class PilotAssignment(db.Model):
 class TowerInspectionStatus(db.Model):
     """Per-tower "Inspection Done" flag — line_id + tower_label together
     identify the tower (same pattern as TowerPhoto, since towers aren't
-    their own database rows). A tower with zero marked defects may be a
-    genuinely good tower. This explicit tower-level flag records that the
-    SME has completed inspection rather than inferring completion from defect
-    count or requiring a separate decision on every clean image. The assigned SME normally sets it after inspection
+    their own database rows). A tower with zero marked defects could
+    either be a genuinely good tower or one nobody has finished reviewing
+    yet — this flag is how Admin explicitly says "done, this one's
+    reviewed" rather than the report generator or the client guessing
+    from defect count alone. The assigned SME normally sets it after review
     (Admin may reopen/correct it). Both report generation and client-facing
     visibility of a tower's photos/defects are gated on this being True.
 
@@ -741,11 +766,11 @@ class TowerDefect(db.Model):
     shape_type     = db.Column(db.String(20), nullable=False)   # 'polygon' | 'rect' | 'circle'
     shape_coords   = db.Column(db.Text, nullable=False)         # JSON list of {x, y} in % of image bounds
     component_name = db.Column(db.String(150), default='')
-    location       = db.Column(db.String(20), default='')       # 'Top' | 'Middle' | 'Bottom'
+    location       = db.Column(db.String(20), default='')       # Top/Middle/Bottom/Left/Right
     defect_type    = db.Column(db.String(100), default='')      # e.g. 'Corrosion', 'Broken Insulator'
     observation    = db.Column(db.String(255), default='')
     severity       = db.Column(db.String(20), default='Minor')  # matches the chimney module's severity vocabulary
-    status         = db.Column(db.String(20), default='OK')     # 'OK' | 'Missing' — the component's own condition
+    status         = db.Column(db.String(20), default='OK')     # component condition (OK/Missing/Damaged/etc.)
     # Separate from the condition status above: has this defect actually
     # been fixed in the field yet? Starts Open on every new defect;
     # Admin or Client closes it once it's rectified.
@@ -928,7 +953,7 @@ class DefectResolutionEvent(db.Model):
             'from_status': self.from_status,
             'to_status': self.to_status,
             'comment': self.comment,
-            'evidence_image_url': f'/static/{self.evidence_image_path}' if self.evidence_image_path else '',
+            'evidence_image_url': stored_url(self.evidence_image_path),
             'changed_by': self.changed_by_name or '',
             'changed_by_role': self.changed_by_role or '',
             'created_at': self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
@@ -1030,7 +1055,7 @@ class TowerReport(db.Model):
             'id':           self.id,
             'line_id':      self.line_id,
             'tower_label':  self.tower_label,
-            'report_url':   f'/static/{self.report_path}' if self.report_path else '',
+            'report_url':   stored_url(self.report_path),
             'generated_by': self.generated_by or '',
             'generated_at': self.generated_at.strftime('%d %b %Y %H:%M') if self.generated_at else '',
         }
@@ -1086,7 +1111,7 @@ class Announcement(db.Model):
             'id': self.id,
             'title': self.title,
             'message': self.message or '',
-            'image_url': f'/static/{self.image_path}' if self.image_path else '',
+            'image_url': stored_url(self.image_path),
             'created_by': self.created_by or '',
             'created_at': _fmt_ist(self.created_at, suffix=False),
         }
@@ -1205,3 +1230,123 @@ class UserNotification(db.Model):
                 'message': self.message or '', 'link_url': self.link_url or '',
                 'is_read': bool(self.is_read),
                 'created_at': self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else ''}
+
+
+class BackgroundJob(db.Model):
+    """Persistent application job claimed by a separate worker process.
+
+    Job state lives in PostgreSQL, so queued work and progress survive web
+    worker restarts. Payloads contain identifiers/options only, never image
+    bytes or credentials.
+    """
+    __tablename__ = 'background_jobs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_type = db.Column(db.String(60), nullable=False, index=True)
+    status = db.Column(db.String(20), nullable=False, default='Queued', server_default='Queued', index=True)
+    payload_json = db.Column(db.Text, nullable=False, default='{}')
+    progress_current = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    progress_total = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    result_json = db.Column(db.Text, nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    attempts = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    max_attempts = db.Column(db.Integer, nullable=False, default=3, server_default='3')
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_by_name = db.Column(db.String(120), default='')
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+
+    def payload(self):
+        try:
+            return json.loads(self.payload_json or '{}')
+        except (TypeError, ValueError):
+            return {}
+
+    def to_dict(self):
+        try:
+            result = json.loads(self.result_json or '{}')
+        except (TypeError, ValueError):
+            result = {}
+        return {
+            'id': self.id, 'job_type': self.job_type, 'status': self.status,
+            'progress_current': self.progress_current or 0,
+            'progress_total': self.progress_total or 0,
+            'result': result, 'error': self.error_message or '',
+            'attempts': self.attempts or 0, 'max_attempts': self.max_attempts or 0,
+            'created_by': self.created_by_name or '',
+            'created_at': self.created_at.isoformat() + 'Z' if self.created_at else '',
+            'started_at': self.started_at.isoformat() + 'Z' if self.started_at else '',
+            'finished_at': self.finished_at.isoformat() + 'Z' if self.finished_at else '',
+        }
+
+
+class SystemHealthSnapshot(db.Model):
+    """Small shared health record visible across all web/worker processes."""
+    __tablename__ = 'system_health_snapshots'
+    __table_args__ = (
+        db.Index('ix_system_health_source_created', 'source', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    source = db.Column(db.String(40), nullable=False)
+    status = db.Column(db.String(20), nullable=False)
+    response_ms = db.Column(db.Float, nullable=True)
+    details_json = db.Column(db.Text, nullable=False, default='{}', server_default='{}')
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self):
+        try:
+            details = json.loads(self.details_json or '{}')
+        except (TypeError, ValueError):
+            details = {}
+        return {'id': self.id, 'source': self.source, 'status': self.status,
+                'response_ms': self.response_ms, 'details': details,
+                'created_at': self.created_at.isoformat() + 'Z' if self.created_at else ''}
+
+
+class ServiceHeartbeat(db.Model):
+    """Shared liveness record for web and background-worker processes."""
+    __tablename__ = 'service_heartbeats'
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.String(180), nullable=False, unique=True, index=True)
+    service_type = db.Column(db.String(30), nullable=False, index=True)
+    hostname = db.Column(db.String(180), nullable=False, default='')
+    process_id = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(20), nullable=False, default='Running')
+    current_job_id = db.Column(db.Integer, db.ForeignKey('background_jobs.id', ondelete='SET NULL'), nullable=True)
+    details_json = db.Column(db.Text, nullable=False, default='{}', server_default='{}')
+    started_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class RequestMetricBucket(db.Model):
+    """Per-process minute bucket combined by the dashboard across Gunicorn workers."""
+    __tablename__ = 'request_metric_buckets'
+    __table_args__ = (
+        db.UniqueConstraint('bucket_start', 'source_id', name='uq_request_metric_bucket_source'),
+        db.Index('ix_request_metric_bucket_start', 'bucket_start'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    bucket_start = db.Column(db.DateTime, nullable=False)
+    source_id = db.Column(db.String(180), nullable=False)
+    request_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    total_response_ms = db.Column(db.Float, nullable=False, default=0, server_default='0')
+    max_response_ms = db.Column(db.Float, nullable=False, default=0, server_default='0')
+    active_users_json = db.Column(db.Text, nullable=False, default='[]', server_default='[]')
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
+class ApplicationRelease(db.Model):
+    """Installed release audit used by compatibility and upgrade checks."""
+    __tablename__ = 'application_releases'
+
+    id = db.Column(db.Integer, primary_key=True)
+    version = db.Column(db.String(40), nullable=False, index=True)
+    migration_revision = db.Column(db.String(40), nullable=False, default='unknown')
+    status = db.Column(db.String(20), nullable=False, default='Verified')
+    details_json = db.Column(db.Text, nullable=False, default='{}', server_default='{}')
+    installed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)

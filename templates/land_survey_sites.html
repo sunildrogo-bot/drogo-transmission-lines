@@ -8,7 +8,7 @@
     position:relative;width:100%;height:200px;flex-shrink:0;display:flex;flex-direction:column;justify-content:flex-end;padding:20px 28px;
     background:
       linear-gradient(180deg,rgba(224, 226, 231, 0.803) 0%,rgba(98, 98, 100, 0.92) 100%),
-      url('https://images.pexels.com/photos/32599646/pexels-photo-32599646.jpeg?auto=compress&cs=tinysrgb&w=1600') center 40%/cover no-repeat;
+      url('{{ url_for('static', filename='images/landsurvey_Cover.png') }}') center 40%/cover no-repeat;
   }
   .banner-title{font-size:11px;letter-spacing:.28em;color:var(--accent-sky);text-transform:uppercase;margin-bottom:4px;font-weight:600;}
   .banner-heading{font-size:22px;font-weight:800;color:#fff;}
@@ -56,7 +56,7 @@
     <div class="projects-grid">
       {% for s in sites %}
       <a href="{{ url_for(s.route) }}" class="project-card">
-        <div class="card-banner" style="background-image:url('https://images.pexels.com/photos/32599646/pexels-photo-32599646.jpeg?auto=compress&cs=tinysrgb&w=800');">
+        <div class="card-banner" style="background-image:url('{{ url_for('static', filename='images/landsurvey_Cover.png') }}');">
           <div class="card-tag">{{ s.name }}</div>
         </div>
         <div class="card-body">

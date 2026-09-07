@@ -3,9 +3,9 @@ import csv
 import io
 import json
 import os
+import threading
 import random
 import shutil
-import threading
 import uuid
 import zipfile
 from datetime import datetime
@@ -14,7 +14,7 @@ from flask import Blueprint, current_app, jsonify, render_template, request, sen
 from PIL import Image
 from werkzeug.utils import secure_filename
 
-from models import db, Project, TowerDefect, TowerInspectionStatus, TowerPhoto
+from models import BackgroundJob, db, Project, TowerDefect, TowerInspectionStatus, TowerPhoto
 
 
 training_export_bp = Blueprint('training_export_bp', __name__)
@@ -81,18 +81,27 @@ def _write_job(job, app=None):
         with open(temporary, 'w', encoding='utf-8') as handle:
             json.dump(job, handle, indent=2)
         os.replace(temporary, path)
+    background_id = job.get('background_job_id')
+    if background_id:
+        background = db.session.get(BackgroundJob, background_id)
+        if background:
+            background.progress_current = max(0, min(100, int(job.get('progress') or 0)))
+            background.progress_total = 100
+            background.heartbeat_at = datetime.utcnow()
+            db.session.commit()
 
 
 def _absolute_photo_path(photo, app=None):
-    app = app or current_app
     stored = (photo.display_image_path() or '').replace('\\', '/').lstrip('/')
     if stored.startswith('static/'):
         stored = stored[len('static/'):]
-    candidate = os.path.abspath(os.path.join(app.static_folder, stored))
-    static_root = os.path.abspath(app.static_folder)
-    if os.path.commonpath([candidate, static_root]) != static_root:
+    if not stored:
         return ''
-    return candidate
+    try:
+        from storage_service import get_storage
+        return get_storage().local_working_path(stored)
+    except (OSError, RuntimeError, ValueError):
+        return ''
 
 
 def _canonical_label(value):
@@ -494,11 +503,15 @@ def create_training_dataset_export():
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     job_id = uuid.uuid4().hex
+    actor = session.get('user_name', 'Admin')
+    from background_jobs import enqueue
+    background = enqueue('training_export', {
+        'job_id': job_id, 'selection': selection, 'actor': actor,
+    }, session.get('user_id'), actor)
     job = {'id': job_id, 'status': 'Queued', 'progress': 0, 'created_at': datetime.utcnow().isoformat() + 'Z',
-           'created_by': session.get('user_name', 'Admin'), 'selection': selection, 'summary': preview, 'error': ''}
+           'created_by': actor, 'selection': selection, 'summary': preview,
+           'background_job_id': background.id, 'error': ''}
     _write_job(job)
-    app = current_app._get_current_object()
-    threading.Thread(target=_run_export, args=(app, job_id, selection, job['created_by']), daemon=True).start()
     return jsonify(job), 202
 
 
@@ -557,4 +570,9 @@ def delete_training_dataset_export(job_id):
         path = os.path.abspath(os.path.join(root, filename))
         if os.path.commonpath([path, root]) == root and os.path.isfile(path):
             os.remove(path)
+    if job.get('background_job_id'):
+        background = db.session.get(BackgroundJob, job['background_job_id'])
+        if background:
+            db.session.delete(background)
+            db.session.commit()
     return jsonify({'deleted': True})

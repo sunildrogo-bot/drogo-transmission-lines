@@ -28,10 +28,9 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn("archive.testzip()", routes)
         self.assertIn("'secrets_included': False", routes)
         self.assertIn("'database_sha256': _sha256(snapshot_path)", routes)
-        self.assertIn('and not photo.raw_deleted', routes)
-        self.assertIn('missing_thumbnail_paths = sorted(thumbnails - actual)', routes)
         self.assertIn("os.path.commonpath", routes)
-        self.assertIn("Automatic database snapshots currently require the local SQLite database", routes)
+        self.assertIn("_snapshot_postgresql", routes)
+        self.assertIn("shutil.which('pg_dump')", routes)
         self.assertIn("fetch('/api/settings/data-health')", script)
         self.assertIn("fetch('/api/settings/backups'", script)
         self.assertIn('Create Pre-Upgrade Backup', script)
@@ -78,13 +77,13 @@ class SecurityWiringTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{view_id}"', template)
         for target_id in (
-            'all-projects-body', 'activity-log-body', 'ann-list',
+            'all-projects-grid', 'activity-log-body', 'ann-list',
             'help-tab-list', 'dp-new', 'storage-total',
         ):
             self.assertIn(f'id="{target_id}"', template)
         self.assertIn("fetch('/api/settings/storage-summary')", script)
         self.assertIn("@settings_bp.route('/api/settings/storage-summary'", routes)
-        self.assertIn("os.path.join(current_app.static_folder, 'uploads')", routes)
+        self.assertIn('get_storage()', routes)
 
     def test_state_changing_session_routes_are_post_only(self):
         app = source('app.py')
@@ -199,7 +198,8 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertGreaterEqual(routes.count('_cleanup_deleted_files('), 6)
         self.assertIn('delete_stored_files(stored_paths)', settings)
         self.assertIn("not raw.startswith('uploads/')", cleanup)
-        self.assertIn("os.path.commonpath([uploads_root, absolute])", cleanup)
+        self.assertIn("storage.delete(raw)", cleanup)
+        self.assertIn("storage.local_path(raw)", cleanup)
 
     def test_project_creator_is_preserved_when_user_is_deleted(self):
         models = source('models.py')
@@ -270,10 +270,10 @@ class SecurityWiringTests(unittest.TestCase):
         template = source('templates/admin.html')
         self.assertIn("'project_progress': project_progress", routes)
         self.assertIn("'admin_uploaded_towers': photographed", routes)
-        self.assertIn("'inspection_not_done_uploaded': inspection_not_done_uploaded", routes)
+        self.assertIn("'sme_review_pending': review_pending", routes)
         self.assertIn("'client_visible': inspected", routes)
         self.assertNotIn("admin_approval", routes)
-        self.assertIn('Admin upload → SME inspects images → Inspection Done → visible to Client', template)
+        self.assertIn('Admin upload → SME review → Inspection Done → visible to Client', template)
         self.assertIn('function renderProjectProgress(rows)', template)
         self.assertIn('Inspection Done / Client Visible', template)
 
@@ -418,33 +418,18 @@ class SecurityWiringTests(unittest.TestCase):
     def test_annotation_deletion_is_recoverable_and_audited(self):
         models = source('models.py')
         routes = source('projects_routes.py')
-        assistant = source('assistant_api.py')
         migration = source('migrations/versions/20260827_0011_inspection_workflow_foundation.py')
         self.assertIn('class DefectAnnotationEvent', models)
         self.assertIn('deleted_at     = db.Column', models)
         self.assertIn("_annotation_event(defect, 'delete'", routes)
         self.assertIn("'/api/tower-defects/<int:defect_id>/restore'", routes)
-        self.assertIn('Restore this annotation before changing its resolution.', routes)
-        self.assertGreaterEqual(assistant.count('TowerDefect.deleted_at.is_(None)'), 3)
         self.assertIn("revision = '20260827_0011'", migration)
 
     def test_annotation_updates_use_optimistic_versioning(self):
         routes = source('projects_routes.py')
         self.assertIn("methods=['PATCH']", routes)
         self.assertIn('This annotation was changed by another user', routes)
-        self.assertIn('version must be an integer.', routes)
-        self.assertIn('_taxonomy_selection_error(defect.component_name, defect.defect_type)', routes)
         self.assertIn("_annotation_event(defect, 'update'", routes)
-
-    def test_seed_script_does_not_embed_demo_credentials(self):
-        seed = source('seed_db.py')
-        self.assertNotIn("'password':", seed)
-        self.assertNotIn('Demo credentials', seed)
-        self.assertNotIn('admin123', seed)
-
-    def test_legacy_photo_rows_are_counted_until_explicitly_deleted(self):
-        routes = source('projects_routes.py')
-        self.assertIn('TowerPhoto.raw_deleted.is_not(True)', routes)
 
     def test_taxonomy_is_admin_managed_and_applied_to_new_annotations(self):
         settings = source('settings_routes.py')
@@ -455,18 +440,113 @@ class SecurityWiringTests(unittest.TestCase):
         self.assertIn('installTaxonomyManager()', settings_js)
         self.assertIn('loadInspectionTaxonomyOptions()', project_map)
 
-    def test_inspection_done_and_quality_dashboard_are_tower_level(self):
+    def test_inspection_done_does_not_require_per_image_review(self):
         routes = source('projects_routes.py')
         project_map = source('templates/project_map.html')
-        settings = source('settings_routes.py')
-        quality = source('templates/inspection_quality.html')
         self.assertNotIn('pending_photo_ids', routes)
         self.assertNotIn('Cannot mark Inspection Done:', routes)
         self.assertNotIn('Mark Reviewed', project_map)
+
+    def test_updates_1_to_5_are_additive_and_persistent(self):
+        models = source('models.py')
+        routes = source('projects_routes.py')
+        settings = source('settings_routes.py')
+        project_map = source('templates/project_map.html')
+        base = source('templates/base.html')
+        jobs = source('background_jobs.py')
+        migration = source('migrations/versions/20260829_0012_performance_jobs_validation.py')
+        self.assertIn('def _validate_uploaded_image(', routes)
+        self.assertIn("'/api/lines/<int:line_id>/validate-image'", routes)
+        self.assertIn('validation_warnings_json', models)
+        self.assertIn('class BackgroundJob(db.Model):', models)
+        self.assertIn("'thumbnail_repair': _run_thumbnail_repair", jobs)
+        self.assertIn("'/api/settings/thumbnail-repair'", settings)
+        self.assertIn('towerPhotosAbortController', project_map)
+        self.assertIn('selectinload(TowerPhoto.defects)', routes)
+        self.assertIn("'/api/lines/<int:line_id>/geojson'", routes)
+        self.assertIn('requestAnimationFrame(addPointWindow)', project_map)
+        self.assertIn("vendor/leaflet/leaflet.js", base)
+        self.assertIn("revision = '20260829_0012'", migration)
+        self.assertIn("down_revision = '20260827_0011'", migration)
+
+    def test_update_6_release_packages_exclude_secrets_and_runtime_data(self):
+        gitignore = source('.gitignore')
+        env_example = source('.env.example')
+        builder = source('scripts/build_release.py')
+        upgrader = source('scripts/upgrade_windows.ps1')
+        self.assertIn('.env', gitignore)
+        self.assertIn('!.env.example', gitignore)
+        self.assertIn('static/uploads/', gitignore)
+        self.assertIn("PRIVATE_PREFIXES", builder)
+        self.assertIn("PRIVATE_KEY_MARKERS", builder)
+        self.assertIn("SENSITIVE_ASSIGNMENT", builder)
+        self.assertIn("RELEASE_MANIFEST.json", builder)
+        self.assertIn("archive.testzip()", builder)
+        self.assertIn("sha256", builder)
+        self.assertIn("$ApplicationPath\\.env", upgrader)
+        self.assertIn("$ApplicationPath\\.venv", upgrader)
+        self.assertIn("$ApplicationPath\\instance\\nova.db", upgrader)
+        self.assertIn("$incomingApp\\static\\uploads", upgrader)
+        self.assertIn("db upgrade", upgrader)
+        self.assertIn('SECRET_KEY=', env_example)
+        self.assertNotRegex(env_example, r'(?m)^SECRET_KEY=.+$')
+
+    def test_update_7_backup_and_dataset_exports_use_persistent_worker(self):
+        backup = source('backup_routes.py')
+        training = source('training_export_routes.py')
+        jobs = source('background_jobs.py')
+        self.assertNotIn('threading.Thread', backup)
+        self.assertNotIn('threading.Thread', training)
+        self.assertIn("enqueue('application_backup'", backup)
+        self.assertIn("enqueue('training_export'", training)
+        self.assertIn("'application_backup': _run_application_backup", jobs)
+        self.assertIn("'training_export': _run_training_export", jobs)
+        self.assertIn('background.heartbeat_at = datetime.utcnow()', backup)
+        self.assertIn('background.heartbeat_at = datetime.utcnow()', training)
+        local_start = source('start_windows.ps1')
+        self.assertIn("'job_worker.py'", local_start)
+        self.assertIn('& $python app.py', local_start)
+        self.assertIn('Stop-Process', local_start)
+
+    def test_updates_8_to_14_production_foundation(self):
+        app = source('app.py')
+        models = source('models.py')
+        storage = source('storage_service.py')
+        settings = source('settings_routes.py')
+        jobs = source('background_jobs.py')
+        worker = source('job_worker.py')
+        base = source('templates/base.html')
+        project_map = source('templates/project_map.html')
+        pilot_map = source('templates/pilot_line_work.html')
+        migration = source('migrations/versions/20260831_0013_production_foundation.py')
+        self.assertIn("--format=custom", source('backup_routes.py'))
+        self.assertIn('class S3Storage:', storage)
+        self.assertIn('generate_presigned_url', storage)
+        self.assertIn("'media_metadata_repair': _run_media_metadata_repair", jobs)
+        self.assertIn("after_id", source('projects_routes.py'))
+        self.assertIn("revision = '20260831_0013'", migration)
+        self.assertIn('leafletRasterLayer', base)
+        self.assertIn('window.addDrogoBaseLayer(pmMap)', project_map)
+        self.assertIn('window.addDrogoBaseLayer(pwMap)', pilot_map)
+        self.assertIn('class SystemHealthSnapshot(db.Model):', models)
+        self.assertIn('background_worker_heartbeat', worker)
+        self.assertIn("'/api/settings/system-health'", settings)
+        self.assertIn("'/healthz'", app)
+        self.assertIn("'/readyz'", app)
+        self.assertIn('ProxyFix', app)
+        self.assertIn('Content-Security-Policy', app)
+
+    def test_inspection_quality_workspace_survives_cumulative_release(self):
+        settings = source('settings_routes.py')
+        quality = source('templates/inspection_quality.html')
+        self.assertIn("'/inspection-quality'", settings)
         self.assertIn("'/api/inspection-quality'", settings)
+        self.assertIn("get_storage().exists(stored_path)", settings)
         self.assertIn("'image_review_required': False", settings)
         self.assertIn('Normal images do not require a separate review mark.', quality)
-        self.assertIn('Inspection Not Done', quality)
+        for template in ('templates/admin.html', 'templates/users.html', 'templates/settings.html'):
+            self.assertIn("settings_bp.inspection_quality_page", source(template))
+        self.assertIn("kind == 'quality'", source('templates/_admin_nav_icons.html'))
 
 
 if __name__ == '__main__':

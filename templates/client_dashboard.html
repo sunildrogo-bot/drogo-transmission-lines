@@ -457,7 +457,7 @@
         <div class="module-grid">
           {% for m in modules %}
           <div class="module-card"
-               style="--accent-card:{{ m.accent or '#b7caf1' }};background-image:url('{{ m.image or 'https://images.pexels.com/photos/611219/watt-electricity-sky-power-611219.jpeg?auto=compress&cs=tinysrgb&w=900' }}');"
+               style="--accent-card:{{ m.accent or '#b7caf1' }};background-image:url('{{ m.image or url_for('static', filename='images/hero/hero_2.jpg') }}');"
                onclick="window.location='{{ url_for(m.route) }}'">
             <div class="module-badge-icon">
               <svg viewBox="0 0 24 24" fill="none"><path d="M12 2L4 6V12L12 16L20 12V6L12 2Z" stroke="#eceef1" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 16V22" stroke="#eceef1" stroke-width="1.6"/><circle cx="12" cy="9" r="1.6" fill="#eceef1"/></svg>

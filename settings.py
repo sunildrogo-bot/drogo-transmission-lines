@@ -1,6 +1,6 @@
 """
 settings.py — App-wide settings helpers (currently just the shared
-"delete password" used to confirm project/chimney deletions).
+"delete password" used to confirm protected project-data deletions).
 """
 from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, AppSetting

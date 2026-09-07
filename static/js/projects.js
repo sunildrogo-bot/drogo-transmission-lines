@@ -1,6 +1,4 @@
-/* projects.js — shared "Add Project" + dynamic project-grid logic.
-   Used by projects.html (Transmission Line) and land_survey_dashboard.html
-   (Land Survey), and any future module listing page. */
+/* projects.js — shared "Add Project" + dynamic project-grid logic. */
 
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -82,9 +80,9 @@ async function submitAddProject() {
   }
 }
 
-/* Default cover photo for project cards — the same transmission-line image
-   used across the static/legacy pages (DVC, Kothegudam, Land Survey banner). */
-const DEFAULT_COVER_IMAGE = 'https://images.pexels.com/photos/32599646/pexels-photo-32599646.jpeg?auto=compress&cs=tinysrgb&w=800';
+/* Local transmission-line cover keeps project cards consistent and removes
+   their former dependency on Land Survey/remote placeholder imagery. */
+const DEFAULT_COVER_IMAGE = '/static/images/marketing_rgb.jpg';
 
 function deleteProjectCard(event, id, name) {
   event.preventDefault();

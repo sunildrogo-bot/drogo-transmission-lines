@@ -58,6 +58,8 @@ def delete_stored_files(stored_paths):
     Paths outside static/uploads are skipped, even if a corrupted database row
     contains an absolute path or traversal sequence.
     """
+    from storage_service import get_storage
+    storage = get_storage()
     static_root = os.path.realpath(current_app.static_folder)
     uploads_root = os.path.realpath(os.path.join(static_root, 'uploads'))
     result = {'removed': 0, 'missing': 0, 'skipped': 0, 'errors': []}
@@ -68,23 +70,15 @@ def delete_stored_files(stored_paths):
         if pure.is_absolute() or '..' in pure.parts or not raw.startswith('uploads/'):
             result['skipped'] += 1
             continue
-        absolute = os.path.realpath(os.path.join(static_root, *pure.parts))
         try:
-            if os.path.commonpath([uploads_root, absolute]) != uploads_root:
-                result['skipped'] += 1
-                continue
-        except ValueError:
-            result['skipped'] += 1
-            continue
-
-        try:
-            if os.path.isfile(absolute) or os.path.islink(absolute):
-                os.remove(absolute)
+            if storage.delete(raw):
                 result['removed'] += 1
-                _prune_empty_parents(os.path.dirname(absolute), uploads_root)
+                if storage.mode == 'local':
+                    absolute = storage.local_path(raw)
+                    _prune_empty_parents(os.path.dirname(absolute), uploads_root)
             else:
                 result['missing'] += 1
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             result['errors'].append(f'{raw}: {exc}')
     return result
 

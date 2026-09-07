@@ -23,6 +23,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app, Response, send_file
 from werkzeug.utils import secure_filename
+from sqlalchemy.orm import selectinload
 from models import db, Project, Division, Line, ActivityLog, TowerPhoto, TowerDefect, DefectResolutionEvent, DefectAnnotationEvent, InspectionComponent, InspectionDefectType, TowerReport, AiInspectionSummary, User, TowerInspectionStatus, PilotAssignment, ThermalPoint, CorridorPhoto, SmeAssignment, PilotLocation, UploadBatch, UploadBatchItem
 from access_control import (
     can_access_division,
@@ -42,7 +43,19 @@ from storage_cleanup import (
     collect_project_files,
     delete_stored_files,
 )
+
+
+def _storage_working_path(value):
+    """Return a local cache path for local or object-backed application files."""
+    if not value:
+        return ''
+    try:
+        from storage_service import get_storage
+        return get_storage().local_working_path(value)
+    except (OSError, RuntimeError, ValueError):
+        return ''
 from notification_service import admin_user_ids, notify_user, notify_users
+from storage_service import get_storage, stored_url
 
 projects_bp = Blueprint('projects_bp', __name__)
 
@@ -244,6 +257,57 @@ def _ext_ok(filename, allowed):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed
 
 
+def _validate_uploaded_image(file_storage, allowed_types=None):
+    """Validate an image without changing or storing it.
+
+    Returns normalized metadata plus warnings. Hard failures are reserved for
+    unreadable/unsupported files; incomplete metadata remains an explicit
+    warning so Admin can still upload legitimate processed imagery.
+    """
+    from PIL import Image, ImageOps
+    warnings = []
+    filename = file_storage.filename or ''
+    stem = re.sub(r'\.[^.]+$', '', filename)
+    filename_thermal = bool(re.search(r'_T(_\S+)?$', stem, re.IGNORECASE))
+    try:
+        file_storage.stream.seek(0)
+        with Image.open(file_storage.stream) as image:
+            image.verify()
+        file_storage.stream.seek(0)
+        with Image.open(file_storage.stream) as image:
+            width, height = ImageOps.exif_transpose(image).size
+            exif = image.getexif()
+            captured_raw = exif.get(36867) or exif.get(306)
+    except Exception as exc:
+        file_storage.stream.seek(0)
+        return {'valid': False, 'status': 'Invalid', 'error': f'Image is unreadable or corrupted: {str(exc)[:180]}'}
+    finally:
+        file_storage.stream.seek(0)
+
+    if width < 640 or height < 480:
+        warnings.append(f'Low resolution ({width}×{height}).')
+    captured_at = None
+    if captured_raw:
+        try:
+            captured_at = datetime.strptime(str(captured_raw), '%Y:%m:%d %H:%M:%S')
+        except (TypeError, ValueError):
+            warnings.append('Capture date is present but unreadable.')
+    else:
+        warnings.append('Capture date/time metadata is missing.')
+
+    media_type = 'thermal' if filename_thermal else 'rgb'
+    if allowed_types and media_type not in allowed_types:
+        return {'valid': False, 'status': 'Wrong Type', 'error':
+                f'{media_type.upper()} image is not enabled for this project.'}
+    if filename_thermal:
+        warnings.append('Thermal classification will be confirmed from radiometric data when measured.')
+    return {
+        'valid': True, 'status': 'Warning' if warnings else 'Ready',
+        'warnings': warnings, 'media_type': media_type,
+        'width': width, 'height': height, 'captured_at': captured_at,
+    }
+
+
 def _save_upload(file_storage, subfolder, allowed_exts):
     """Save an uploaded file under static/uploads/<subfolder>/ and return the
     path relative to /static (or '' if no valid file was supplied)."""
@@ -259,11 +323,15 @@ def _save_upload(file_storage, subfolder, allowed_exts):
     name_root, name_ext = os.path.splitext(safe_name)
     final_name = safe_name
     i = 1
-    while os.path.exists(os.path.join(folder_fs, final_name)):
+    while (os.path.exists(os.path.join(folder_fs, final_name)) or
+           get_storage().exists(f"uploads/{subfolder}/{final_name}")):
         final_name = f"{name_root}_{i}{name_ext}"
         i += 1
-    file_storage.save(os.path.join(folder_fs, final_name))
-    return f"uploads/{subfolder}/{final_name}"
+    full_path = os.path.join(folder_fs, final_name)
+    file_storage.save(full_path)
+    stored = f"uploads/{subfolder}/{final_name}"
+    get_storage().publish(stored, full_path)
+    return stored
 
 
 def _generate_thumbnail(base_dir, subfolder_raw, filename):
@@ -283,7 +351,9 @@ def _generate_thumbnail(base_dir, subfolder_raw, filename):
             im.thumbnail((800, 800), Image.Resampling.LANCZOS)
             im.save(temp_path, 'JPEG', quality=90, optimize=True)
         os.replace(temp_path, thumb_full_path)
-        return f"uploads/{thumb_subfolder}/{thumb_name}"
+        stored = f"uploads/{thumb_subfolder}/{thumb_name}"
+        get_storage().publish(stored, thumb_full_path)
+        return stored
     except Exception:
         try:
             if os.path.exists(temp_path):
@@ -314,7 +384,9 @@ def _generate_flat_thumbnail(base_dir, flat_subfolder, filename):
             im.thumbnail((800, 800), Image.Resampling.LANCZOS)
             im.save(temp_path, 'JPEG', quality=90, optimize=True)
         os.replace(temp_path, thumb_full_path)
-        return f"uploads/{thumb_subfolder}/{thumb_name}"
+        stored = f"uploads/{thumb_subfolder}/{thumb_name}"
+        get_storage().publish(stored, thumb_full_path)
+        return stored
     except Exception:
         try:
             if os.path.exists(temp_path):
@@ -362,10 +434,14 @@ def _save_tower_photo(file_storage, project, division, line, tower_label, allowe
     name_root, name_ext = os.path.splitext(safe_name)
     final_name = safe_name
     i = 1
-    while os.path.exists(os.path.join(folder_fs, final_name)):
+    while (os.path.exists(os.path.join(folder_fs, final_name)) or
+           get_storage().exists(f"uploads/{subfolder.replace(os.sep, '/')}/{final_name}")):
         final_name = f"{name_root}_{i}{name_ext}"
         i += 1
-    file_storage.save(os.path.join(folder_fs, final_name))
+    full_path = os.path.join(folder_fs, final_name)
+    file_storage.save(full_path)
+    stored_path = f"uploads/{subfolder}/{final_name}".replace('\\', '/')
+    get_storage().publish(stored_path, full_path)
 
     thumb_path = None
     if kind == 'raw':
@@ -373,7 +449,7 @@ def _save_tower_photo(file_storage, project, division, line, tower_label, allowe
         if thumb_path:
             thumb_path = thumb_path.replace('\\', '/')
 
-    return f"uploads/{subfolder}/{final_name}", thumb_path
+    return stored_path, thumb_path
 
 
 def _duplicate_photo_for_defects(photo):
@@ -389,9 +465,8 @@ def _duplicate_photo_for_defects(photo):
         return True
     if not photo.image_path:
         return False
-    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
-    src = os.path.join(base_dir, 'static', photo.image_path)
-    if not os.path.isfile(src):
+    src = _storage_working_path(photo.image_path)
+    if not src:
         return False
     raw_dir, filename = os.path.split(photo.image_path)
     # .../<tower>/raw  ->  .../<tower>/defects
@@ -401,12 +476,13 @@ def _duplicate_photo_for_defects(photo):
         # existed) have no /raw suffix to swap — give them their own
         # defects/ sibling next to wherever they actually live instead.
         defects_rel_dir = raw_dir + '_defects'
-    dest_dir = os.path.join(base_dir, 'static', defects_rel_dir)
+    dest_dir = os.path.join(current_app.static_folder, *defects_rel_dir.split('/'))
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
     if not os.path.isfile(dest):
         shutil.copy2(src, dest)
     photo.defect_copy_path = f"{defects_rel_dir}/{filename}"
+    get_storage().publish(photo.defect_copy_path, dest)
     return True
 
 
@@ -701,7 +777,7 @@ def api_thermal_probe(photo_id):
     photo = TowerPhoto.query.get_or_404(photo_id)
     try:
         from thermal_decode import probe_rjpeg
-        path = os.path.join(current_app.static_folder, photo.image_path) if photo.image_path else ''
+        path = _storage_working_path(photo.image_path)
         info = probe_rjpeg(path)
         info['filename'] = os.path.basename(photo.image_path or '')
         return jsonify(info)
@@ -827,8 +903,8 @@ def _build_project_defect_summary(project):
             'created_at': defect.created_at,
             'created_by': defect.created_by,
             'image_path': photo.image_path or '',
-            'image_url': f'/static/{photo.image_path}' if photo.image_path else '',
-            'thumbnail_url': f'/static/{photo.thumbnail_path or photo.display_image_path()}' if (photo.thumbnail_path or photo.display_image_path()) else '',
+            'image_url': stored_url(photo.image_path),
+            'thumbnail_url': stored_url(photo.thumbnail_path or photo.display_image_path()),
             'shape_type': defect.shape_type,
             'shape_coords': shape_coords,
         })
@@ -1139,7 +1215,7 @@ def project_defect_report(project_id):
 
     try:
         from trans_report import build_trans_report_pdf
-        static_root = os.path.join(current_app.root_path, 'static')
+        static_root = current_app.static_folder
         pdf_buf = build_trans_report_pdf(project, summary, static_root)
     except Exception as e:
         current_app.logger.exception('TRANS report generation failed for project %s', project_id)
@@ -1353,7 +1429,7 @@ def api_create_line(division_id):
         # The KML itself is authoritative once uploaded — auto-derive the
         # real tower count from its actual Point placemarks rather than
         # trusting whatever number was typed (or defaulted to 0).
-        full_kml_path = os.path.join(current_app.root_path, 'static', kml_path)
+        full_kml_path = _storage_working_path(kml_path)
         auto_count = _count_kml_tower_points(full_kml_path)
         if auto_count is not None:
             tower_count = auto_count
@@ -1397,8 +1473,8 @@ def api_get_line(line_id):
 @projects_bp.route('/api/lines/<int:line_id>/kml-attributes', methods=['POST'])
 def api_set_visible_kml_attrs(line_id):
     """Which raw KML ExtendedData keys Admin wants shown in the Tower
-    Details panel — the KML itself is still parsed client-side (same as
-    always, via togeojson), this just remembers the chosen subset so
+    Details panel — the line map is now served through the authenticated
+    GeoJSON cache; this remembers the chosen subset so
     every tower's panel filters down to it instead of dumping every raw
     field (styleUrl, styleHash, etc.) every time."""
     guard = _admin_guard()
@@ -1496,6 +1572,96 @@ def _kml_pick_tower_label(props):
     return 'Point'
 
 
+def _line_geojson(line):
+    """Convert the authoritative KML/KMZ into a cacheable FeatureCollection."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+    if not line or not line.kml_path:
+        return None
+    source = _storage_working_path(line.kml_path)
+    if not source:
+        return None
+    try:
+        if source.lower().endswith('.kmz'):
+            with zipfile.ZipFile(source) as archive:
+                member = next((name for name in archive.namelist() if name.lower().endswith('.kml')), None)
+                if not member:
+                    return None
+                root = ET.fromstring(archive.read(member))
+        else:
+            root = ET.parse(source).getroot()
+    except (OSError, ValueError, ET.ParseError, zipfile.BadZipFile):
+        return None
+    features = []
+    for placemark in root.iter():
+        if _kml_local_tag(placemark) != 'Placemark':
+            continue
+        props = _kml_placemark_props(placemark)
+        for geometry in placemark.iter():
+            kind = _kml_local_tag(geometry)
+            if kind not in {'Point', 'LineString'}:
+                continue
+            coords_el = next((child for child in geometry.iter() if _kml_local_tag(child) == 'coordinates'), None)
+            if coords_el is None or not coords_el.text:
+                continue
+            coordinates = []
+            for raw in coords_el.text.replace('\n', ' ').split():
+                parts = raw.split(',')
+                try:
+                    coordinates.append([float(parts[0]), float(parts[1])])
+                except (IndexError, ValueError):
+                    continue
+            if coordinates:
+                features.append({'type': 'Feature', 'properties': props, 'geometry': {
+                    'type': kind, 'coordinates': coordinates[0] if kind == 'Point' else coordinates}})
+    return {'type': 'FeatureCollection', 'features': features} if features else None
+
+
+def _ensure_line_geojson_cache(line):
+    data = _line_geojson(line)
+    if not data:
+        return None
+    folder = os.path.join(current_app.static_folder, 'uploads', 'kml_cache')
+    os.makedirs(folder, exist_ok=True)
+    destination = os.path.join(folder, f'line_{line.id}.geojson')
+    temporary = destination + '.tmp'
+    with open(temporary, 'w', encoding='utf-8') as handle:
+        json.dump(data, handle, separators=(',', ':'), ensure_ascii=False)
+    os.replace(temporary, destination)
+    line.geojson_path = f'uploads/kml_cache/line_{line.id}.geojson'
+    from storage_service import get_storage
+    get_storage().publish(line.geojson_path, destination)
+    db.session.commit()
+    return data
+
+
+@projects_bp.route('/api/lines/<int:line_id>/geojson', methods=['GET'])
+def api_line_geojson(line_id):
+    guard = _login_guard()
+    if guard:
+        return guard
+    guard = _line_access_guard(line_id)
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+    data = None
+    if line.geojson_path:
+        cached = _storage_working_path(line.geojson_path)
+        try:
+            if cached and os.path.isfile(cached):
+                with open(cached, encoding='utf-8') as handle:
+                    data = json.load(handle)
+        except (OSError, ValueError):
+            data = None
+    if data is None:
+        data = _ensure_line_geojson_cache(line)
+    if not data:
+        return jsonify({'error': 'KML contains no usable point or line geometry.'}), 422
+    response = jsonify(data)
+    response.headers['Cache-Control'] = 'private, max-age=3600'
+    return response
+
+
 def _kml_tower_coordinates(line, tower_label):
     """Return trusted ``(lat, lng)`` for a tower from the line's KML/KMZ.
 
@@ -1505,8 +1671,8 @@ def _kml_tower_coordinates(line, tower_label):
     """
     if not line or not line.kml_path or not tower_label:
         return None
-    full_path = os.path.join(current_app.root_path, 'static', line.kml_path)
-    if not os.path.isfile(full_path):
+    full_path = _storage_working_path(line.kml_path)
+    if not full_path:
         return None
 
     import xml.etree.ElementTree as ET
@@ -1584,9 +1750,9 @@ def api_edit_kml(line_id):
     if not isinstance(lines_in, list):
         return jsonify({'error': 'lines must be a list.'}), 400
 
-    full_path = os.path.join(current_app.root_path, 'static', line.kml_path)
-    if not os.path.exists(full_path):
-        return jsonify({'error': 'KML file not found on disk.'}), 404
+    full_path = _storage_working_path(line.kml_path)
+    if not full_path:
+        return jsonify({'error': 'KML file was not found in active storage.'}), 404
 
     import xml.etree.ElementTree as ET
     KML_NS = 'http://www.opengis.net/kml/2.2'
@@ -1727,6 +1893,8 @@ def api_edit_kml(line_id):
         edited_lines += 1
 
     tree.write(full_path, encoding='utf-8', xml_declaration=True)
+    from storage_service import get_storage
+    get_storage().publish(line.kml_path, full_path)
 
     # Points may have been added/removed in this edit — keep tower_count
     # in sync with what the KML now actually contains.
@@ -1767,7 +1935,7 @@ def api_delete_line(line_id):
 
 
 # ── Tower photos ─────────────────────────────────────────────────────────
-# Tower points come from parsing a Line's KML client-side (not individual
+# Tower points come from a Line's cached GeoJSON (not individual
 # DB rows) — photos are matched to a specific point by line_id + the
 # tower's label as it appears in the KML (e.g. "T12"), passed by the client
 # exactly as shown in the tower details panel.
@@ -1784,9 +1952,19 @@ def api_list_tower_photos(line_id):
     tower_label = (request.args.get('tower') or '').strip()
     if not tower_label:
         return jsonify({'error': 'tower is required.'}), 400
-    photos = (TowerPhoto.query
-              .filter_by(line_id=line_id, tower_label=tower_label)
-              .order_by(TowerPhoto.id.asc()).all())
+    try:
+        per_page = min(200, max(20, int(request.args.get('per_page') or 120)))
+        after_id = max(0, int(request.args.get('after_id') or 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid pagination values.'}), 400
+    query = (TowerPhoto.query
+             .filter_by(line_id=line_id, tower_label=tower_label)
+             .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points)))
+    if after_id:
+        query = query.filter(TowerPhoto.id > after_id)
+    rows = query.order_by(TowerPhoto.id.asc()).limit(per_page + 1).all()
+    has_more = len(rows) > per_page
+    photos = rows[:per_page]
     # Client sessions only ever see a tower's photos once Admin has
     # explicitly marked that tower's inspection as done — NOT just
     # whether defects happen to be marked. A tower with zero defects is
@@ -1802,7 +1980,8 @@ def api_list_tower_photos(line_id):
         status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
         if not status or not status.inspection_done:
             photos = []
-    return jsonify({'photos': [p.to_dict() for p in photos]})
+    return jsonify({'photos': [p.to_dict() for p in photos], 'has_more': has_more,
+                    'next_after_id': photos[-1].id if has_more and photos else None})
 
 
 @projects_bp.route('/api/tower-photos/<int:photo_id>/image', methods=['GET'])
@@ -1820,7 +1999,7 @@ def api_tower_photo_image(photo_id):
     if not can_access_photo(photo) or not client_can_access_tower(photo.line_id, photo.tower_label):
         return jsonify({'error': 'You do not have access to this photo.'}), 403
 
-    static_root = os.path.abspath(current_app.static_folder)
+    storage = get_storage()
     candidates = [photo.image_path, photo.defect_copy_path, photo.thumbnail_path]
     for stored_path in candidates:
         normalised = (stored_path or '').replace('\\', '/').lstrip('/')
@@ -1828,11 +2007,11 @@ def api_tower_photo_image(photo_id):
             normalised = normalised[len('static/'):]
         if not normalised:
             continue
-        absolute_path = os.path.abspath(os.path.join(static_root, *normalised.split('/')))
-        if os.path.commonpath([static_root, absolute_path]) != static_root:
+        try:
+            if storage.exists(normalised):
+                return storage.response(normalised, max_age=86400)
+        except (OSError, ValueError, RuntimeError):
             continue
-        if os.path.isfile(absolute_path):
-            return send_file(absolute_path, conditional=True, max_age=86400)
     return jsonify({'error': 'The image file was not found in the copied uploads folder.'}), 404
 
 
@@ -1858,12 +2037,9 @@ def api_upload_tower_photo(line_id):
     # "_T_something") suffix on the filename.
     project = line.division.project if line.division else None
     allowed_types = project.get_inspection_types() if project else ['rgb', 'thermal']
-    stem = re.sub(r'\.[^.]+$', '', image_file.filename)
-    is_thermal_upload = bool(re.search(r'_T(_\S+)?$', stem, re.IGNORECASE))
-    if is_thermal_upload and 'thermal' not in allowed_types:
-        return jsonify({'error': f'This project is RGB-only — "{image_file.filename}" looks like a thermal photo and was not uploaded.'}), 400
-    if not is_thermal_upload and 'rgb' not in allowed_types:
-        return jsonify({'error': f'This project is Thermal-only — "{image_file.filename}" looks like an RGB photo and was not uploaded.'}), 400
+    validation = _validate_uploaded_image(image_file, allowed_types)
+    if not validation.get('valid'):
+        return jsonify({'error': validation.get('error'), 'validation': validation}), 400
 
     # Reject an exact re-upload of a photo already on this tower — same
     # bytes, not just a similar filename (a fresh EXIF-preserving copy or
@@ -1920,10 +2096,36 @@ def api_upload_tower_photo(line_id):
         gps_lat=gps[0] if gps else None,
         gps_lng=gps[1] if gps else None,
         content_hash=content_hash,
+        media_type=validation['media_type'], image_width=validation['width'],
+        image_height=validation['height'], captured_at=validation['captured_at'],
+        validation_status=validation['status'],
+        validation_warnings_json=json.dumps(validation.get('warnings') or []),
     )
     db.session.add(photo)
     db.session.commit()
-    return jsonify(photo.to_dict()), 201
+    result = photo.to_dict()
+    result['validation'] = validation
+    return jsonify(result), 201
+
+
+@projects_bp.route('/api/lines/<int:line_id>/validate-image', methods=['POST'])
+def api_validate_tower_image(line_id):
+    """Optional single-file preflight used by Admin troubleshooting.
+
+    Bulk upload performs equivalent local preflight before confirmation and
+    the real upload endpoint always repeats authoritative server validation.
+    """
+    guard = _admin_guard()
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+    image_file = request.files.get('image')
+    if not image_file or not image_file.filename:
+        return jsonify({'error': 'An image file is required.'}), 400
+    project = line.division.project if line.division else None
+    allowed_types = project.get_inspection_types() if project else ['rgb', 'thermal']
+    validation = _validate_uploaded_image(image_file, allowed_types)
+    return jsonify(validation), 200 if validation.get('valid') else 400
 
 
 @projects_bp.route('/api/lines/<int:line_id>/upload-batches', methods=['GET', 'POST'])
@@ -1970,7 +2172,7 @@ def api_upload_batch(batch_id):
     items = data.get('items') or []
     for item in items:
         status = item.get('status')
-        if status not in {'Completed', 'Duplicate', 'Failed', 'No GPS', 'Unmatched', 'Cancelled'}:
+        if status not in {'Completed', 'Duplicate', 'Failed', 'Invalid', 'Wrong Type', 'No GPS', 'Unmatched', 'Cancelled'}:
             continue
         db.session.add(UploadBatchItem(
             batch_id=batch.id, filename=(item.get('filename') or 'unknown')[:500],
@@ -1984,7 +2186,7 @@ def api_upload_batch(batch_id):
                   .group_by(UploadBatchItem.status).all())
     batch.completed_files = counts.get('Completed', 0)
     batch.duplicate_files = counts.get('Duplicate', 0)
-    batch.failed_files = counts.get('Failed', 0)
+    batch.failed_files = counts.get('Failed', 0) + counts.get('Invalid', 0) + counts.get('Wrong Type', 0)
     batch.no_gps_files = counts.get('No GPS', 0)
     batch.unmatched_files = counts.get('Unmatched', 0)
     batch.cancelled_files = counts.get('Cancelled', 0)
@@ -2046,8 +2248,8 @@ def api_tower_defects_flat(line_id):
     out = []
     for d in defects:
         entry = d.to_dict()
-        entry['image_url'] = f'/static/{d.photo.image_path}' if d.photo.image_path else ''
-        entry['thumbnail_url'] = f'/static/{d.photo.thumbnail_path}' if d.photo.thumbnail_path else entry['image_url']
+        entry['image_url'] = stored_url(d.photo.image_path)
+        entry['thumbnail_url'] = stored_url(d.photo.thumbnail_path) if d.photo.thumbnail_path else entry['image_url']
         out.append(entry)
     return jsonify({'defects': out})
 
@@ -2080,7 +2282,7 @@ def api_tower_thermal_points_flat(line_id):
     out = []
     for pt in points:
         entry = pt.to_dict()
-        entry['image_url'] = f'/static/{pt.photo.image_path}' if pt.photo.image_path else ''
+        entry['image_url'] = stored_url(pt.photo.image_path)
         out.append(entry)
     return jsonify({'points': out})
 
@@ -2198,7 +2400,7 @@ def api_tower_summary(line_id):
     defect_counts = dict(
         db.session.query(TowerPhoto.tower_label, db.func.count(TowerDefect.id))
         .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-        .filter(TowerPhoto.line_id == line_id, TowerDefect.deleted_at.is_(None))
+        .filter(TowerPhoto.line_id == line_id)
         .group_by(TowerPhoto.tower_label)
         .all()
     )
@@ -2216,7 +2418,7 @@ def api_tower_summary(line_id):
         .group_by(TowerPhoto.tower_label).all()
     )
     photo_counts = dict(db.session.query(TowerPhoto.tower_label, db.func.count(TowerPhoto.id))
-                        .filter(TowerPhoto.line_id == line_id, TowerPhoto.raw_deleted.is_not(True))
+                        .filter(TowerPhoto.line_id == line_id, TowerPhoto.raw_deleted.is_(False))
                         .group_by(TowerPhoto.tower_label).all())
     inspection_rows = TowerInspectionStatus.query.filter_by(line_id=line_id).all()
     inspection_done = {r.tower_label: bool(r.inspection_done) for r in inspection_rows}
@@ -2296,11 +2498,9 @@ def api_set_inspection_status(line_id, tower_label):
     tower_label = tower_label.strip()
     data = request.get_json(force=True, silent=True) or {}
     done = bool(data.get('inspection_done'))
-    # Inspection is intentionally completed at tower level. The SME browses
-    # every available image, marks only visible findings, and may move past a
-    # normal image without recording a separate per-image review decision.
-    # Consequently there is no image-level review gate here: Inspection Done
-    # is the explicit release decision that makes the tower visible to Client.
+    # Completion is a tower-level SME decision. Clean images require no
+    # per-image mark; the SME browses them, records findings only where
+    # present, then marks the tower Inspection Done.
     status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
     was_done = bool(status and status.inspection_done)
 
@@ -2635,7 +2835,7 @@ def api_pilot_assignments():
         entry['division_name'] = division.name if division else '—'
         entry['project_name'] = project.name if project else '—'
         entry['project_module'] = project.module if project else ''
-        entry['kml_url'] = f'/static/{line.kml_path}' if line and line.kml_path else ''
+        entry['kml_url'] = stored_url(line.kml_path) if line else ''
         out.append(entry)
     return jsonify({'assignments': out})
 
@@ -2911,9 +3111,18 @@ def api_delete_corridor_photo(photo_id):
 # can't add to them).
 
 VALID_SHAPE_TYPES = {'polygon', 'rect', 'circle'}
-VALID_LOCATIONS = {'Top', 'Middle', 'Bottom'}
+VALID_LOCATIONS = {'Top', 'Middle', 'Bottom', 'Left', 'Right'}
 VALID_SEVERITIES = {'Minor', 'Major', 'Critical'}
-VALID_DEFECT_STATUSES = {'OK', 'Missing'}
+VALID_DEFECT_STATUSES = {
+    # Common physical/component conditions.
+    'OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Cracked', 'Corroded',
+    'Bent', 'Displaced', 'Deformed', 'Burnt', 'Contaminated',
+    'Not Connected', 'Needs Attention', 'Not Applicable',
+    # Defect-specific inspection results retained by the UI.
+    'No', 'Yes', 'Issue Found', 'Not Required', 'Required', 'Done',
+    'Good', 'Fair', 'Poor', 'Within Limit', 'Not Within Limit',
+    'Connected', 'None Missing', 'Parts Missing',
+}
 
 
 def _defect_snapshot(defect):
@@ -2934,25 +3143,6 @@ def _annotation_event(defect, action, before=None, after=None, reason=''):
         reason=(reason or '')[:255], changed_by_user_id=session.get('user_id'),
         changed_by_name=session.get('user_name', ''), changed_by_role=session.get('role', ''),
     ))
-
-
-def _taxonomy_selection_error(component_name, defect_type):
-    """Validate a selection once an active controlled taxonomy exists."""
-    configured_component = (InspectionComponent.query
-                            .filter(InspectionComponent.active.is_(True),
-                                    db.func.lower(InspectionComponent.name) == component_name.casefold())
-                            .first())
-    if InspectionComponent.query.filter(InspectionComponent.active.is_(True)).first() and not configured_component:
-        return 'Select an active component from the controlled inspection taxonomy.'
-    if configured_component:
-        configured_type = (InspectionDefectType.query
-                           .filter(InspectionDefectType.component_id == configured_component.id,
-                                   InspectionDefectType.active.is_(True),
-                                   db.func.lower(InspectionDefectType.name) == defect_type.casefold())
-                           .first())
-        if not configured_type:
-            return 'The selected defect type is not active for this component.'
-    return ''
 
 
 @projects_bp.route('/api/tower-photos/<int:photo_id>/defects', methods=['GET'])
@@ -2999,20 +3189,19 @@ def api_create_tower_defect(photo_id):
 
     location = (data.get('location') or '').strip()
     if location and location not in VALID_LOCATIONS:
-        return jsonify({'error': 'location must be one of: Top, Middle, Bottom.'}), 400
+        return jsonify({'error': 'location must be one of: Top, Middle, Bottom, Left, Right.'}), 400
 
     severity = (data.get('severity') or 'Minor').strip()
     if severity not in VALID_SEVERITIES:
         severity = 'Minor'
 
-    # Status vocabulary is now per defect-type (a Number Plate is
-    # checked as present/missing/damaged; Tower Painting Condition is a
-    # Good/Fair/Poor call; a clearance check is Within/Not Within Limit)
-    # rather than one fixed list — maintaining a server-side enum that
-    # has to mirror the client-side per-type mapping exactly would only
-    # create a way for the two to drift out of sync, so this just keeps
-    # it a short descriptive string instead of validating against a set.
-    status = (data.get('status') or 'OK').strip()[:40] or 'OK'
+    # Status keeps both the defect-specific inspection vocabulary and a
+    # shared condition vocabulary. Validate it server-side so direct API
+    # requests cannot save an unexpected status that filters and reports
+    # do not understand.
+    status = (data.get('status') or 'OK').strip()
+    if status not in VALID_DEFECT_STATUSES:
+        return jsonify({'error': 'Select a valid defect condition status.'}), 400
 
     component_name = (data.get('component_name') or '').strip()
     defect_type = (data.get('defect_type') or '').strip()
@@ -3021,9 +3210,18 @@ def api_create_tower_defect(photo_id):
     if not defect_type:
         return jsonify({'error': 'Select a defect type before saving the annotation.'}), 400
 
-    taxonomy_error = _taxonomy_selection_error(component_name, defect_type)
-    if taxonomy_error:
-        return jsonify({'error': taxonomy_error}), 400
+    taxonomy_type = (InspectionDefectType.query.join(InspectionComponent)
+                     .filter(InspectionComponent.name == component_name,
+                             InspectionDefectType.name == defect_type,
+                             InspectionComponent.active.is_(True),
+                             InspectionDefectType.active.is_(True)).first())
+    # Existing installations may not have activated taxonomy yet. Once the
+    # matching component exists, reject names outside its controlled list.
+    configured_component = InspectionComponent.query.filter_by(name=component_name, active=True).first()
+    if InspectionComponent.query.filter_by(active=True).first() and not configured_component:
+        return jsonify({'error': 'Select an active component from the controlled inspection taxonomy.'}), 400
+    if configured_component and not taxonomy_type:
+        return jsonify({'error': 'The selected defect type is not active for this component.'}), 400
 
     defect = TowerDefect(
         tower_photo_id=photo_id,
@@ -3071,8 +3269,6 @@ def api_resolve_tower_defect(defect_id):
     guard = _photo_access_guard(defect.tower_photo_id)
     if guard:
         return guard
-    if defect.deleted_at:
-        return jsonify({'error': 'Restore this annotation before changing its resolution.'}), 409
     guard = _client_photo_release_guard(defect.photo)
     if guard:
         return guard
@@ -3173,14 +3369,9 @@ def api_update_tower_defect(defect_id):
         return jsonify({'error': 'Restore this annotation before editing it.'}), 409
     data = request.get_json(force=True, silent=True) or {}
     expected_version = data.get('version')
-    if expected_version is not None:
-        try:
-            expected_version = int(expected_version)
-        except (TypeError, ValueError):
-            return jsonify({'error': 'version must be an integer.'}), 400
-        if expected_version != (defect.version or 1):
-            return jsonify({'error': 'This annotation was changed by another user. Reload it before saving.',
-                            'current': defect.to_dict()}), 409
+    if expected_version is not None and int(expected_version) != (defect.version or 1):
+        return jsonify({'error': 'This annotation was changed by another user. Reload it before saving.',
+                        'current': defect.to_dict()}), 409
     before = _defect_snapshot(defect)
     for field, limit in (('component_name', 150), ('defect_type', 100), ('comments', 2000),
                          ('observation', 255), ('status', 40), ('location', 20)):
@@ -3191,16 +3382,8 @@ def api_update_tower_defect(defect_id):
         if severity not in VALID_SEVERITIES:
             return jsonify({'error': 'Severity must be Minor, Major or Critical.'}), 400
         defect.severity = severity
-    if defect.location and defect.location not in VALID_LOCATIONS:
-        db.session.rollback()
-        return jsonify({'error': 'location must be one of: Top, Middle, Bottom.'}), 400
     if not defect.component_name or not defect.defect_type:
-        db.session.rollback()
         return jsonify({'error': 'Component and defect type are required.'}), 400
-    taxonomy_error = _taxonomy_selection_error(defect.component_name, defect.defect_type)
-    if taxonomy_error:
-        db.session.rollback()
-        return jsonify({'error': taxonomy_error}), 400
     defect.version = (defect.version or 1) + 1
     after = _defect_snapshot(defect)
     _annotation_event(defect, 'update', before=before, after=after)
@@ -3241,7 +3424,7 @@ def api_delete_raw_images(line_id):
     line = Line.query.get_or_404(line_id)
 
     photos = TowerPhoto.query.filter_by(line_id=line_id).all()
-    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
+    storage = get_storage()
 
     deleted_count = 0
     freed_bytes = 0
@@ -3260,20 +3443,16 @@ def api_delete_raw_images(line_id):
         if photo.defects and not photo.defect_copy_path:
             _duplicate_photo_for_defects(photo)
 
-        copy_path = os.path.join(base_dir, 'static', photo.defect_copy_path) if photo.defect_copy_path else ''
-        if not copy_path or not os.path.isfile(copy_path):
+        if not photo.defect_copy_path or not storage.exists(photo.defect_copy_path):
             skipped_no_copy += 1
             continue
-
-        full_path = os.path.join(base_dir, 'static', photo.image_path)
-        if os.path.isfile(full_path):
-            try:
-                freed_bytes += os.path.getsize(full_path)
-                os.remove(full_path)
+        try:
+            freed_bytes += storage.size(photo.image_path)
+            if storage.delete(photo.image_path):
                 deleted_count += 1
-            except OSError:
-                continue
-        if not os.path.exists(full_path):
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not storage.exists(photo.image_path):
             photo.raw_deleted = True
 
     db.session.commit()
@@ -3317,7 +3496,7 @@ def api_list_thermal_points(photo_id):
     # params (distance/humidity/etc); a per-point override only affects
     # that one point's own reading, not this frame-wide range.
     frame_min_c = frame_max_c = None
-    image_abs_path = os.path.join(current_app.static_folder, photo.image_path) if photo.image_path else ''
+    image_abs_path = _storage_working_path(photo.image_path)
     if image_abs_path and os.path.exists(image_abs_path):
         try:
             matrix = thermal_decode.get_temperature_matrix(image_abs_path)
@@ -3378,7 +3557,7 @@ def _validate_and_measure_thermal(photo, data):
     # naming mismatch shouldn't block a photo that genuinely has real
     # thermal data. Extraction is attempted first; the filename is only
     # used afterward, to word the error usefully if it fails.
-    image_abs_path = os.path.join(current_app.static_folder, photo.image_path) if photo.image_path else ''
+    image_abs_path = _storage_working_path(photo.image_path)
     avg_c = min_c = max_c = raw_avg = raw_min = raw_max = None
     error = 'Photo has no saved image file.'
     if image_abs_path and os.path.exists(image_abs_path):
@@ -3507,7 +3686,7 @@ def _tower_summary_sources(line_id, tower_label):
         photo = photo_by_id[defect.tower_photo_id]
         sources.append({
             'id': f'D{defect.id}', 'kind': 'defect', 'record_id': defect.id,
-            'photo_id': photo.id, 'url': f'/static/{photo.display_image_path()}',
+            'photo_id': photo.id, 'url': stored_url(photo.display_image_path()),
             'title': f'{defect.severity or "Minor"} {defect.defect_type or "defect"}',
             'fact': (f'Component: {defect.component_name or "unspecified"}; location: {defect.location or "unspecified"}; '
                      f'defect: {defect.defect_type or "unspecified"}; severity: {defect.severity or "Minor"}; '
@@ -3522,7 +3701,7 @@ def _tower_summary_sources(line_id, tower_label):
         span = '' if point.min_c is None or point.max_c is None else f', {point.min_c:.2f}-{point.max_c:.2f} C range'
         sources.append({
             'id': f'T{point.id}', 'kind': 'thermal', 'record_id': point.id,
-            'photo_id': photo.id, 'url': f'/static/{photo.display_image_path()}',
+            'photo_id': photo.id, 'url': stored_url(photo.display_image_path()),
             'title': point.label or f'Thermal measurement {point.id}',
             'fact': f'Label: {point.label or "unlabelled"}; shape: {point.shape_type or "point"}; temperature: {temp}{span}; error: {point.error or "none"}.'
         })
@@ -3735,6 +3914,13 @@ def api_generate_tower_report(line_id):
         static_root = os.path.join(current_app.root_path, 'static')
         project = line.division.project if line.division else None
         client_logo_path = project.logo_path if project else ''
+        # The PDF renderer expects filesystem paths. Object-backed assets are
+        # hydrated into the protected local working cache before rendering.
+        for item in defect_dicts:
+            _storage_working_path(item.get('image_path'))
+        for item in thermal_photo_dicts:
+            _storage_working_path(item.get('image_path'))
+        _storage_working_path(client_logo_path)
         inspection_types = project.get_inspection_types() if project else ['rgb', 'thermal']
         pdf_buf = build_tower_report_pdf(info, defect_dicts, static_root, client_logo_path, thermal_photo_dicts,
                                           inspection_types=inspection_types)
@@ -3745,7 +3931,7 @@ def api_generate_tower_report(line_id):
     # Save to disk under static/uploads/tower_reports/, same pattern as
     # _save_upload() but for a PDF we built ourselves rather than an
     # uploaded file.
-    folder_fs = os.path.join(current_app.root_path, UPLOAD_BASE, 'tower_reports')
+    folder_fs = os.path.join(current_app.static_folder, 'uploads', 'tower_reports')
     os.makedirs(folder_fs, exist_ok=True)
     safe_tower = secure_filename(tower_label) or 'tower'
     filename = f'line{line_id}_{safe_tower}_report.pdf'
@@ -3753,6 +3939,7 @@ def api_generate_tower_report(line_id):
     with open(full_path, 'wb') as f:
         f.write(pdf_buf.getvalue())
     report_path = f'uploads/tower_reports/{filename}'
+    get_storage().publish(report_path, full_path)
 
     # Replace any existing report for this exact tower rather than
     # accumulating duplicate rows/files each time it's regenerated.
@@ -3784,9 +3971,8 @@ def api_download_tower_report(report_id):
     guard = _client_tower_release_guard(report.line_id, report.tower_label)
     if guard:
         return guard
-    full_path = os.path.join(current_app.root_path, 'static', report.report_path)
-    if not os.path.exists(full_path):
+    storage = get_storage()
+    if not storage.exists(report.report_path):
         return jsonify({'error': 'Report file not found — try generating it again.'}), 404
-    from flask import send_file
     download_name = f'Tower_{secure_filename(report.tower_label)}_Inspection_Report.pdf'
-    return send_file(full_path, as_attachment=True, download_name=download_name, mimetype='application/pdf')
+    return storage.response(report.report_path, download_name=download_name)

@@ -139,7 +139,7 @@
   const MAP_BASE = "{{ url_for('projects_bp.project_map', project_id=project.id) }}";
   const PROJECT_TAG = {{ (project.state or project.module or 'DIVISION')|upper|tojson }};
   const PROJECT_LOGO = {{ (('/static/' ~ project.logo_path) if project.logo_path else '')|tojson }};
-  const DEFAULT_COVER = 'https://images.pexels.com/photos/32599646/pexels-photo-32599646.jpeg?auto=compress&cs=tinysrgb&w=800';
+  const DEFAULT_COVER = {{ url_for('static', filename='images/marketing_rgb.jpg')|tojson }};
   const PROJECT_BANNER = {{ (project.legacy_banner or '')|tojson }} || DEFAULT_COVER;
 
   function escapeHtml(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}

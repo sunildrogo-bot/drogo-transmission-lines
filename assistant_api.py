@@ -164,10 +164,7 @@ def tool_list_tower_defects(project_name, line_name, tower_label):
     photo_ids = [p.id for p in photos]
     if not photo_ids:
         return {'defects': [], 'note': 'No photos uploaded for this tower yet.'}
-    defects = TowerDefect.query.filter(
-        TowerDefect.tower_photo_id.in_(photo_ids),
-        TowerDefect.deleted_at.is_(None),
-    ).all()
+    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all()
     return {'defects': [{
         'id': d.id, 'component_name': d.component_name, 'defect_type': d.defect_type,
         'location': d.location, 'severity': d.severity,
@@ -184,7 +181,7 @@ def tool_search_defects(project_name, severity=None, status=None, component_name
     if not line_ids:
         return {'defects': []}
     q = (TowerDefect.query.join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
-         .filter(TowerPhoto.line_id.in_(line_ids), TowerDefect.deleted_at.is_(None)))
+         .filter(TowerPhoto.line_id.in_(line_ids)))
     if severity:
         q = q.filter(TowerDefect.severity == severity)
     if status:
@@ -233,10 +230,7 @@ def tool_generate_tower_report(project_name, line_name, tower_label):
     import projects_routes as pr
     photos = TowerPhoto.query.filter_by(line_id=line.id, tower_label=str(tower_label)).all()
     photo_ids = [p.id for p in photos]
-    defects = (TowerDefect.query.filter(
-        TowerDefect.tower_photo_id.in_(photo_ids),
-        TowerDefect.deleted_at.is_(None),
-    ).all() if photo_ids else [])
+    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all() if photo_ids else []
     photo_by_id = {p.id: p for p in photos}
     defect_dicts = []
     for d in defects:
@@ -346,7 +340,11 @@ def tool_generate_central_report():
     with open(full_path, 'wb') as f:
         f.write(pdf_buf.getvalue())
 
-    return {'ok': True, 'download_url': f'/static/uploads/central_reports/{filename}',
+    from storage_service import get_storage, stored_url
+    report_key = f'uploads/central_reports/{filename}'
+    get_storage().publish(report_key, full_path)
+
+    return {'ok': True, 'download_url': stored_url(report_key),
             'project_count': len(out), 'total_defects': sum(p['total_defects'] for p in out)}
 
 

@@ -5,10 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <meta name="csrf-token" content="{{ csrf_token() }}"/>
   <title>{% block title %}NOVA+{% endblock %}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}"/>
   <style>
     :root{
       /* ---- Drogo Aerospace design system ---- */
@@ -33,10 +30,11 @@
       --radius-sm:8px;
       --radius-md:12px;
       --radius-lg:18px;
-      --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      --font:'Segoe UI',-apple-system,BlinkMacSystemFont,Arial,sans-serif;
     }
     *{box-sizing:border-box;margin:0;padding:0;}
     html,body{height:100%;font-family:var(--font);background:var(--bg-base);color:var(--text-primary);}
+    .drogo-map-tiles-unavailable{background:#eef0f2!important;}
 
     /* Navbar */
     .navbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;border-bottom:1px solid var(--border-soft);background:var(--bg-panel);flex-shrink:0;}
@@ -74,7 +72,7 @@
 
     .error-msg{font-size:12.5px;color:var(--danger);text-align:center;background:rgba(201,75,66,.08);border:1px solid rgba(201,75,66,.3);border-radius:var(--radius-sm);padding:9px;}
 
-    /* Shared delete-confirm modal (used by projects.js / chimney.js) */
+    /* Shared delete-confirm modal used by project management. */
     .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center;}
     .modal-backdrop.open{display:flex;}
     .modal{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);width:100%;max-width:420px;padding:26px 28px;box-shadow:0 20px 60px rgba(0,0,0,.18);position:relative;}
@@ -227,8 +225,7 @@
 </div>
 
 <script>
-  // Shared delete-with-password flow. Call:
-  //   requestDelete({ url: '/api/chimney-projects/12', label: 'Unit-2 Flue Stack', onSuccess: () => location.reload() })
+  // Shared delete-with-password flow for protected project data.
   let _deleteConfirmState = null;
 
   function requestDelete(opts) {
@@ -279,7 +276,28 @@
   }
 </script>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/pmtiles/pmtiles.js') }}"></script>
+<script>
+window.addDrogoBaseLayer = function(map) {
+  const mode = {{ map_tile_mode|tojson }};
+  const archiveUrl = {{ pmtiles_url|tojson }};
+  const tileUrl = {{ map_tile_url|tojson }};
+  const attribution = {{ map_tile_attribution|tojson }};
+  if (mode === 'pmtiles' && window.pmtiles && archiveUrl) {
+    const archive = new pmtiles.PMTiles(archiveUrl);
+    return pmtiles.leafletRasterLayer(archive, {attribution: 'Offline map'}).addTo(map);
+  }
+  if (mode === 'none' || !tileUrl) return L.layerGroup().addTo(map);
+  const layer = L.tileLayer(tileUrl, {maxZoom: 20, attribution: attribution || ''}).addTo(map);
+  let failures = 0;
+  layer.on('tileerror', () => {
+    failures += 1;
+    if (failures === 3) map.getContainer().classList.add('drogo-map-tiles-unavailable');
+  });
+  return layer;
+};
+</script>
 {% if session.user_id %}
 <script>
   let _globalNotifications = [];

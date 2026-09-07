@@ -16,6 +16,7 @@ function settingsNav(viewId, el) {
   }
   if (viewId === 'view-uploads') {
     loadStorageSummary();
+    loadThumbnailRepair();
     loadAllProjects();
     loadDataHealth();
     loadBackupHistory();
@@ -27,6 +28,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('help-tab-badge')) refreshHelpBadge();
   installTaxonomyManager();
   installBackupManager();
+  installCompatibilityManager();
+  installActivityControls();
+  installProductionHealthManager();
 
   // Cross-page links (the new-ticket dashboard popup, mainly) land here
   // with ?view=help so Notifications opens automatically.
@@ -48,23 +52,158 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let backupPollTimer = null;
 
+function createStorageTool(id, title, copy, glyph, order, wide = false) {
+  const grid = document.getElementById('storage-tool-grid');
+  if (!grid) return null;
+  const details = document.createElement('details');
+  details.id = id;
+  details.className = `storage-tool-card${wide ? ' storage-tool-wide' : ''}`;
+  details.style.order = String(order || 0);
+  details.innerHTML = `<summary class="storage-tool-summary">
+    <span class="storage-tool-icon" aria-hidden="true">${glyph}</span>
+    <span><span class="storage-tool-title">${escapeHtml(title)}</span><span class="storage-tool-copy">${escapeHtml(copy)}</span></span>
+    <span class="storage-tool-chevron" aria-hidden="true">›</span>
+  </summary><div class="storage-tool-body"></div>`;
+  grid.appendChild(details);
+  return details.querySelector('.storage-tool-body');
+}
+
+function installCompatibilityManager() {
+  const view = document.getElementById('view-uploads');
+  if (!view || document.getElementById('release-compatibility-card')) return;
+  const wrap = createStorageTool('release-compatibility-card', 'Version & compatibility',
+    'Verify protected application features before an upgrade.', '✓', 50);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="settings-card"><div class="settings-card-title">Application release status</div>
+    <div class="settings-card-desc">Confirms that this source package contains every protected application feature before an upgrade.</div>
+    <div id="compatibility-summary" class="backup-message">Checking release compatibility…</div>
+    <div style="margin-top:14px"><button class="btn-ghost" onclick="loadCompatibilityStatus()">Check Again</button></div></div>`;
+  loadCompatibilityStatus();
+  installStorageMigrationManager(view);
+}
+
+function installStorageMigrationManager(view) {
+  if (document.getElementById('storage-migration-card')) return;
+  const wrap = createStorageTool('storage-migration-card', 'Object storage',
+    'Provider readiness and tracked-file migration.', '↥', 30);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="settings-card">
+    <div class="settings-card-title">Tracked-file migration</div>
+    <div class="settings-card-desc">Copies database-linked uploads that still exist only on this server into the configured object store. It never deletes local files.</div>
+    <div id="storage-migration-summary" class="backup-message">Checking storage status…</div>
+    <div style="margin-top:14px"><button class="btn-primary" id="storage-migration-btn" onclick="startStorageMigration()">Copy Missing Files</button></div>
+  </div>`;
+  loadStorageMigrationStatus();
+}
+
+function installProductionHealthManager() {
+  const view = document.getElementById('view-uploads');
+  if (!view || document.getElementById('production-health-card')) return;
+  const wrap = createStorageTool('production-health-card', 'Deployment health',
+    'Web, database, worker, jobs and map checks.', '●', 40);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="settings-card">
+    <div class="settings-card-title">Production services</div>
+    <div class="settings-card-desc">Checks the web process, reverse-proxy configuration, database, object storage, background worker, map source and persistent jobs.</div>
+    <div class="backup-health-grid" id="production-health-grid"><div class="backup-message" style="grid-column:1/-1">Checking services…</div></div>
+    <div id="production-health-message"></div><div style="margin-top:14px"><button class="btn-ghost" onclick="loadProductionHealth()">Check Again</button></div></div>`;
+  loadProductionHealth();
+}
+
+async function loadProductionHealth() {
+  const grid = document.getElementById('production-health-grid'); const message = document.getElementById('production-health-message');
+  if (!grid) return;
+  try {
+    const response = await fetch('/api/settings/system-health'); const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Service health check failed.');
+    const checks = data.checks || {}; const web = checks.web || {}; const jobs = checks.jobs || {};
+    const headerText = document.getElementById('settings-system-health-text');
+    if (headerText) headerText.textContent = `${web.environment || 'application'} · ${data.status}`;
+    const healthTitle = document.getElementById('storage-health-title');
+    const healthNote = document.getElementById('storage-health-note');
+    if (healthTitle) healthTitle.textContent = data.status === 'healthy' ? 'Application is running normally' : 'Application needs attention';
+    if (healthNote) healthNote.textContent = checks.worker?.age_seconds != null ? `Worker heartbeat ${checks.worker.age_seconds}s ago` : 'Background worker heartbeat not detected';
+    [['database', checks.database], ['storage', checks.storage], ['worker', checks.worker], ['map', checks.map]].forEach(([name, check]) => {
+      const dot = document.getElementById(`health-${name}-dot`);
+      if (dot) dot.style.background = check?.status === 'ok' || check?.status === 'healthy' || check?.status === 'running' ? 'var(--success)' : 'var(--warning)';
+    });
+    grid.innerHTML = [
+      ['Overall', data.status, `${data.response_ms || 0} ms probe`],
+      ['Web', web.status || 'unknown', `${web.server || 'unknown'} · proxy ${web.reverse_proxy_trusted ? 'trusted' : 'not configured'}`],
+      ['Database', checks.database?.status || 'unknown', checks.database?.backend || '—'],
+      ['Storage', checks.storage?.status || 'unknown', checks.storage?.backend || '—'],
+      ['Worker', checks.worker?.status || 'unknown', checks.worker?.age_seconds != null ? `${checks.worker.age_seconds}s since heartbeat` : 'No heartbeat'],
+      ['Jobs', jobs.failed ? 'attention' : 'ok', `${jobs.queued || 0} queued · ${jobs.processing || 0} processing · ${jobs.failed || 0} failed`],
+      ['Map', checks.map?.status || 'unknown', checks.map?.mode || '—']
+    ].map(item => `<div class="backup-health-stat"><div class="backup-health-label">${escapeHtml(item[0])}</div><div class="backup-health-value" style="font-size:15px">${escapeHtml(item[1])}</div><div class="backup-health-note">${escapeHtml(item[2])}</div></div>`).join('');
+    const warnings = web.warnings || [];
+    message.innerHTML = warnings.length ? `<div class="backup-message warn">${warnings.map(escapeHtml).join('<br>')}</div>` : '';
+  } catch (error) { grid.innerHTML = `<div class="backup-message warn" style="grid-column:1/-1">${escapeHtml(error.message)}</div>`; }
+}
+
+async function loadStorageMigrationStatus() {
+  const target = document.getElementById('storage-migration-summary');
+  if (!target) return;
+  try {
+    const response = await fetch('/api/settings/storage-migration'); const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Storage status failed.');
+    const job = (data.jobs || [])[0];
+    if (data.storage_backend === 'local') {
+      target.textContent = 'Local storage is active. No object-storage copy is required.';
+      document.getElementById('storage-migration-btn').disabled = true;
+    } else if (!job) target.textContent = 'Object storage is active. Run once to copy any older local-only files.';
+    else target.textContent = `Latest copy: ${job.status} · ${job.progress_current || 0} of ${job.progress_total || 0}`;
+  } catch (error) { target.className = 'backup-message warn'; target.textContent = error.message; }
+}
+
+async function startStorageMigration() {
+  const button = document.getElementById('storage-migration-btn');
+  if (button) { button.disabled = true; button.textContent = 'Queued…'; }
+  try {
+    const response = await fetch('/api/settings/storage-migration', {method: 'POST'});
+    const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not queue storage copy.');
+    await loadStorageMigrationStatus();
+  } catch (error) {
+    const target = document.getElementById('storage-migration-summary'); target.className = 'backup-message warn'; target.textContent = error.message;
+  } finally { if (button) { button.disabled = false; button.textContent = 'Copy Missing Files'; } }
+}
+
+async function loadCompatibilityStatus() {
+  const target = document.getElementById('compatibility-summary');
+  if (!target) return;
+  try {
+    const response = await fetch('/api/settings/compatibility');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Compatibility check failed.');
+    const healthy = data.missing === 0;
+    target.className = `backup-message${healthy ? '' : ' warn'}`;
+    target.innerHTML = `<strong>Version ${escapeHtml(data.version)}</strong> · Revision ${escapeHtml(data.database_revision)}<br>
+      ${Number(data.passed)} of ${Number(data.total)} protected features available · Worker: ${escapeHtml(data.worker)}
+      ${healthy ? '<br>Source compatibility check passed.' : `<br>${Number(data.missing)} required feature(s) are missing. Do not deploy this source.`}`;
+  } catch (error) {
+    target.className = 'backup-message warn';
+    target.textContent = error.message;
+  }
+}
+
 function installBackupManager() {
   const view = document.getElementById('view-uploads');
   if (!view || document.getElementById('backup-upgrade-manager')) return;
-  const wrap = document.createElement('div');
-  wrap.id = 'backup-upgrade-manager';
-  wrap.innerHTML = `<div class="section-label">BACKUP &amp; UPGRADE SAFETY</div>
-    <div class="settings-card">
+  const wrap = createStorageTool('backup-upgrade-manager', 'Backup & recovery',
+    'Check data health and create recoverable checkpoints.', '↻', 10, true);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="settings-card">
       <div class="settings-card-title">Data health and recovery</div>
       <div class="settings-card-desc">Check that database records and stored files agree, then create a recoverable checkpoint before moving to another application version. Secrets from .env are never included.</div>
       <div class="backup-health-grid" id="backup-health-grid"><div class="backup-message" style="grid-column:1/-1">Run a health check to inspect the current data.</div></div>
       <div id="backup-health-message"></div>
+      <div id="data-health-relink"></div>
       <div class="backup-actions"><button class="btn-ghost" id="data-health-btn" onclick="loadDataHealth(true)">Check Data Health</button>
+        <button class="btn-ghost" onclick="window.location.href='/api/settings/data-health/issues.csv'">Download Issue CSV</button>
         <button class="btn-primary" id="backup-create-btn" onclick="createApplicationBackup(false)">Create Backup</button>
         <button class="btn-ghost" id="backup-upgrade-btn" onclick="createApplicationBackup(true)">Create Pre-Upgrade Backup</button></div>
     </div>
     <div class="section-label">BACKUP HISTORY</div><div id="backup-history" class="backup-list"><div class="backup-message">Loading backup history…</div></div>`;
-  view.appendChild(wrap);
 }
 
 async function loadDataHealth(forceMessage = false) {
@@ -86,11 +225,25 @@ async function loadDataHealth(forceMessage = false) {
     message.innerHTML = notes.length
       ? `<div class="backup-message warn">${notes.map(escapeHtml).join('<br>')}</div>`
       : `<div class="backup-message">Database and tracked uploads are consistent. You can create a backup checkpoint.</div>`;
+    const relink = document.getElementById('data-health-relink');
+    const groups = Object.entries(data.files.missing_by_category || {});
+    const suggestions = data.files.relink_suggestions || [];
+    relink.innerHTML = `${groups.length ? `<div class="backup-message"><strong>Missing files by category:</strong><br>${groups.map(([name,count]) => `${escapeHtml(name)}: ${Number(count).toLocaleString()}`).join(' · ')}</div>` : ''}
+      ${suggestions.length ? `<div class="backup-message"><strong>${suggestions.length} safe relink suggestion(s)</strong><br>Only exact filenames with one untracked candidate are offered.<div style="margin-top:8px;display:grid;gap:6px">${suggestions.slice(0,10).map((row,index) => `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between"><span style="overflow:hidden;text-overflow:ellipsis">${escapeHtml(row.missing)} → ${escapeHtml(row.candidate)}</span><button class="btn-ghost data-relink-btn" data-index="${index}">Relink</button></div>`).join('')}</div></div>` : ''}`;
+    relink.querySelectorAll('.data-relink-btn').forEach(button => button.addEventListener('click', () => applyDataRelink(suggestions[Number(button.dataset.index)])));
   } catch (e) {
     message.innerHTML = `<div class="backup-message warn">${escapeHtml(e.message)}</div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Check Data Health'; }
   }
+}
+
+async function applyDataRelink(suggestion) {
+  if (!suggestion || !confirm(`Relink the missing database path to this existing file?\n\n${suggestion.candidate}`)) return;
+  const response = await fetch('/api/settings/data-health/relink', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(suggestion)});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) { alert(data.error || 'Relink failed.'); return; }
+  await loadDataHealth(true);
 }
 
 async function createApplicationBackup(preUpgrade) {
@@ -278,9 +431,116 @@ async function loadStorageSummary() {
     total.textContent = data.formatted_size || '0 B';
     files.textContent = Number(data.file_count || 0).toLocaleString();
     mode.textContent = data.storage_type || 'Application uploads folder';
+    const meter = document.getElementById('storage-meter-fill');
+    const note = document.getElementById('storage-capacity-note');
+    if (meter) meter.style.width = `${Math.max(0, Math.min(100, Number(data.used_percent || 0)))}%`;
+    if (note) note.textContent = data.disk_free ? `${data.disk_free} available` : `${Number(data.file_count || 0).toLocaleString()} managed files`;
   } catch (e) {
     total.textContent = 'Unavailable';
     files.textContent = '—';
+  }
+}
+
+let thumbnailRepairPoll = null;
+async function loadThumbnailRepair() {
+  const view = document.getElementById('view-uploads');
+  if (!view) return;
+  if (!document.getElementById('thumbnail-repair-card')) {
+    const card = createStorageTool('thumbnail-repair-card', 'Thumbnail repair',
+      'Regenerate missing previews without changing originals.', '▧', 20);
+    if (!card) return;
+    card.innerHTML = `<div class="settings-card-title">Thumbnail health and repair</div>
+      <div class="settings-card-desc">Regenerate only missing gallery thumbnails. Original RGB and radiometric thermal files are never changed.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:22px;font-weight:800" id="thumbnail-missing-count">—</div><div style="font-size:10.5px;color:var(--text-muted)">missing thumbnails</div></div>
+        <button class="btn-primary" id="thumbnail-repair-btn" onclick="startThumbnailRepair()">Regenerate Missing Thumbnails</button>
+      </div><div id="thumbnail-repair-status" style="font-size:11px;color:var(--text-muted);margin-top:10px">Checking…</div>`;
+  }
+  const count = document.getElementById('thumbnail-missing-count');
+  const status = document.getElementById('thumbnail-repair-status');
+  const button = document.getElementById('thumbnail-repair-btn');
+  try {
+    const res = await fetch('/api/settings/thumbnail-repair');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not check thumbnails.');
+    count.textContent = Number(data.missing || 0).toLocaleString();
+    const active = (data.jobs || []).find(job => ['Queued','Processing'].includes(job.status));
+    button.disabled = !!active || !data.missing;
+    button.textContent = active ? 'Repair Running…' : 'Regenerate Missing Thumbnails';
+    if (active) {
+      status.textContent = `${active.status}: ${active.progress_current || 0}/${active.progress_total || data.missing || 0}`;
+      clearTimeout(thumbnailRepairPoll);
+      thumbnailRepairPoll = setTimeout(loadThumbnailRepair, 2000);
+    } else {
+      const latest = (data.jobs || [])[0], result = latest?.result || {};
+      status.textContent = latest ? `Last job: ${latest.status} · ${result.repaired || 0} repaired · ${result.failed || 0} failed` : 'No repair job has been run.';
+    }
+  } catch (error) { status.textContent = error.message; }
+  loadMediaMetadataRepair();
+}
+
+async function startThumbnailRepair() {
+  const button = document.getElementById('thumbnail-repair-btn');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/api/settings/thumbnail-repair', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not queue thumbnail repair.');
+    await loadThumbnailRepair();
+  } catch (error) {
+    document.getElementById('thumbnail-repair-status').textContent = error.message;
+    if (button) button.disabled = false;
+  }
+}
+
+let mediaMetadataPoll = null;
+async function loadMediaMetadataRepair() {
+  const view = document.getElementById('view-uploads');
+  if (!view) return;
+  if (!document.getElementById('media-metadata-card')) {
+    const card = createStorageTool('media-metadata-card', 'Image metadata',
+      'Classify existing RGB and thermal files safely.', 'i', 25);
+    if (!card) return;
+    card.innerHTML = `<div class="settings-card-title">Existing image metadata</div>
+      <div class="settings-card-desc">Classify existing RGB/Thermal files and record dimensions, capture time and validation health without changing originals.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:22px;font-weight:800" id="metadata-legacy-count">—</div><div style="font-size:10.5px;color:var(--text-muted)">legacy images awaiting metadata</div></div>
+        <button class="btn-primary" id="metadata-repair-btn" onclick="startMediaMetadataRepair()">Repair Existing Metadata</button>
+      </div><div id="metadata-repair-status" style="font-size:11px;color:var(--text-muted);margin-top:10px">Checking…</div>`;
+  }
+  const count = document.getElementById('metadata-legacy-count');
+  const status = document.getElementById('metadata-repair-status');
+  const button = document.getElementById('metadata-repair-btn');
+  try {
+    const res = await fetch('/api/settings/media-metadata-repair');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not check existing image metadata.');
+    count.textContent = Number(data.legacy_count || 0).toLocaleString();
+    const active = (data.jobs || []).find(job => ['Queued','Processing'].includes(job.status));
+    button.disabled = !!active || !data.legacy_count;
+    button.textContent = active ? 'Metadata Repair Running…' : 'Repair Existing Metadata';
+    if (active) {
+      status.textContent = `${active.status}: ${active.progress_current || 0}/${active.progress_total || data.legacy_count || 0}`;
+      clearTimeout(mediaMetadataPoll);
+      mediaMetadataPoll = setTimeout(loadMediaMetadataRepair, 2000);
+    } else {
+      const latest = (data.jobs || [])[0], result = latest?.result || {};
+      status.textContent = latest ? `Last job: ${latest.status} · ${result.updated || 0} updated · ${result.missing || 0} missing · ${result.failed || 0} invalid` : 'No metadata repair has been run.';
+    }
+  } catch (error) { status.textContent = error.message; }
+}
+
+async function startMediaMetadataRepair() {
+  const button = document.getElementById('metadata-repair-btn');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/api/settings/media-metadata-repair', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not queue metadata repair.');
+    await loadMediaMetadataRepair();
+  } catch (error) {
+    document.getElementById('metadata-repair-status').textContent = error.message;
+    if (button) button.disabled = false;
   }
 }
 
@@ -336,30 +596,59 @@ async function saveDeletePassword() {
   }
 }
 
-async function loadActivityLog() {
+let activityPage = 1;
+let activityCategory = 'all';
+let activitySearch = '';
+let activitySearchTimer = null;
+
+function installActivityControls() {
+  document.querySelectorAll('#activity-filters .activity-filter').forEach(button => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('#activity-filters .activity-filter').forEach(item => item.classList.remove('active'));
+      button.classList.add('active'); activityCategory = button.dataset.category || 'all'; loadActivityLog();
+    });
+  });
+  const search = document.getElementById('activity-search');
+  if (search) search.addEventListener('input', () => {
+    clearTimeout(activitySearchTimer);
+    activitySearchTimer = setTimeout(() => { activitySearch = search.value.trim(); loadActivityLog(); }, 300);
+  });
+}
+
+async function loadActivityLog(append = false) {
   const body = document.getElementById('activity-log-body');
+  if (!body) return;
+  if (!append) { activityPage = 1; body.innerHTML = `<tr class="empty-row"><td colspan="7">Loading activity…</td></tr>`; }
   try {
-    const res = await fetch('/api/settings/activity-log');
+    const query = new URLSearchParams({page: String(activityPage), per_page: '20', category: activityCategory});
+    if (activitySearch) query.set('search', activitySearch);
+    const res = await fetch(`/api/settings/activity-log?${query}`);
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not load activity.');
     const entries = data.entries || [];
-    if (!entries.length) {
+    if (!entries.length && !append) {
       body.innerHTML = `<tr class="empty-row"><td colspan="7">No activity recorded yet.</td></tr>`;
-      return;
+    } else {
+      const rows = entries.map(e => `
+        <tr>
+          <td><span class="action-chip ${escapeHtml(e.action)}">${escapeHtml(e.action)}</span></td>
+          <td>${escapeHtml(e.entity_name || '—')}</td>
+          <td>${escapeHtml(e.module || '—')}</td>
+          <td>${escapeHtml(e.performed_by || '—')}</td>
+          <td>${escapeHtml(e.role || '—')}</td>
+          <td>${escapeHtml(e.duration || '—')}</td>
+          <td title="${escapeHtml(e.created_at)}">${timeAgo(e.created_at_iso)}</td>
+        </tr>`).join('');
+      if (append) body.insertAdjacentHTML('beforeend', rows); else body.innerHTML = rows;
     }
-    body.innerHTML = entries.map(e => `
-      <tr>
-        <td><span class="action-chip ${escapeHtml(e.action)}">${escapeHtml(e.action)}</span></td>
-        <td>${escapeHtml(e.entity_name || '—')}</td>
-        <td>${escapeHtml(e.module || '—')}</td>
-        <td>${escapeHtml(e.performed_by || '—')}</td>
-        <td>${escapeHtml(e.role || '—')}</td>
-        <td>${escapeHtml(e.duration || '—')}</td>
-        <td title="${escapeHtml(e.created_at)}">${timeAgo(e.created_at_iso)}</td>
-      </tr>`).join('');
+    const more = document.getElementById('activity-load-more');
+    if (more) more.style.display = data.has_more ? '' : 'none';
   } catch (e) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load activity log.</td></tr>`;
+    if (!append) body.innerHTML = `<tr class="empty-row"><td colspan="7">Could not load activity log.</td></tr>`;
   }
 }
+
+function loadMoreActivity() { activityPage += 1; loadActivityLog(true); }
 
 function timeAgo(iso) {
   if (!iso) return '—';
@@ -520,29 +809,33 @@ async function setTicketStatus(id, status) {
 }
 
 async function loadAllProjects() {
-  const body = document.getElementById('all-projects-body');
-  if (!body) return;
+  const grid = document.getElementById('all-projects-grid');
+  if (!grid) return;
   try {
     const res = await fetch('/api/settings/all-projects');
     const data = await res.json();
     const projects = data.projects || [];
     if (!projects.length) {
-      body.innerHTML = `<tr class="empty-row"><td colspan="5">No projects yet.</td></tr>`;
+      grid.innerHTML = `<div class="project-data-card"><div class="project-data-detail">No projects yet.</div></div>`;
       return;
     }
-    body.innerHTML = projects.map(p => `
-      <tr>
-        <td>${escapeHtml(p.module)}</td>
-        <td>${p.open_url ? `<a href="${p.open_url}" style="color:var(--accent);font-weight:600;text-decoration:none;">${escapeHtml(p.name)}</a>` : escapeHtml(p.name)}</td>
-        <td>${escapeHtml(p.detail)}</td>
-        <td>${escapeHtml(p.created_at)}</td>
-        <td style="text-align:right;">
+    grid.innerHTML = projects.map(p => `
+      <article class="project-data-card">
+        <div class="project-data-head"><div class="project-data-icon" aria-hidden="true">⌁</div><span class="project-data-module">${escapeHtml(p.module || 'TRANS')}</span></div>
+        <div class="project-data-name">${escapeHtml(p.name)}</div>
+        <div class="project-data-detail">${escapeHtml(p.detail)}</div>
+        <div class="project-data-stats">
+          <div><div class="project-data-value">${Number(p.division_count || 0).toLocaleString()}</div><div class="project-data-label">DIVISIONS</div></div>
+          <div><div class="project-data-value">${Number(p.line_count || 0).toLocaleString()}</div><div class="project-data-label">LINES</div></div>
+          <div><div class="project-data-value">${Number(p.tower_count || 0).toLocaleString()}</div><div class="project-data-label">TOWERS</div></div>
+        </div>
+        <div class="project-data-footer"><span class="project-data-created">Created ${escapeHtml(p.created_at)}</span><span class="project-data-actions">
           <button type="button" class="browse-btn" onclick="openTowerBrowser(${p.id}, '${escapeHtml(p.name).replace(/'/g, "\\'")}')">Browse</button>
           <button type="button" class="ann-delete-btn" onclick="requestDelete({url:'${p.delete_url}', label:'${escapeHtml(p.name).replace(/'/g, "\\'")}', onSuccess: loadAllProjects})">Delete</button>
-        </td>
-      </tr>`).join('');
+        </span></div>
+      </article>`).join('');
   } catch (e) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="5">Could not load projects.</td></tr>`;
+    grid.innerHTML = `<div class="project-data-card"><div class="project-data-detail">Could not load projects.</div></div>`;
   }
 }
 

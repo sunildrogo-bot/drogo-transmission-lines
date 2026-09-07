@@ -30,11 +30,17 @@ def _save_user_photo(file_storage):
     name_root, name_ext = os.path.splitext(safe_name)
     final_name = safe_name
     i = 1
-    while os.path.exists(os.path.join(folder_fs, final_name)):
+    from storage_service import get_storage
+    storage = get_storage()
+    while (os.path.exists(os.path.join(folder_fs, final_name)) or
+           storage.exists(f"uploads/user_photos/{final_name}")):
         final_name = f"{name_root}_{i}{name_ext}"
         i += 1
-    file_storage.save(os.path.join(folder_fs, final_name))
-    return f"uploads/user_photos/{final_name}"
+    destination = os.path.join(folder_fs, final_name)
+    file_storage.save(destination)
+    stored = f"uploads/user_photos/{final_name}"
+    storage.publish(stored, destination)
+    return stored
 
 
 def _require_admin():

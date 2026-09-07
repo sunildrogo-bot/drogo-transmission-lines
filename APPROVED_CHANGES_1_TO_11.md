@@ -13,7 +13,7 @@ roles and inspection release workflow.
 6. Project-map position, zoom and tower context preserved during the session.
 7. Canonical workflow status helpers without rewriting existing records.
 8. Tower sidebar filters, open/critical counts and previous/next navigation.
-9. Tower-level completion and server-enforced Inspection Done validation.
+9. Explicit image review and server-enforced Inspection Done validation.
 10. Recoverable annotation deletion, audit snapshots and optimistic edit versions.
 11. Admin-managed Component & Defect Taxonomy under Settings → Inspection.
 

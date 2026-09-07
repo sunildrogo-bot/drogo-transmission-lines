@@ -6,6 +6,8 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from functools import wraps
 import json
 from datetime import datetime, timedelta
+from werkzeug.middleware.proxy_fix import ProxyFix
+from sqlalchemy import text as sql_text
 from dotenv import load_dotenv
 load_dotenv()
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -14,7 +16,12 @@ def create_app(db_url: str | None = None) -> Flask:
     app = Flask(__name__)
 
     # ── Config ────────────────────────────────────────────────────────────────
-    app.secret_key = os.environ.get('SECRET_KEY', 'nova-plus-dev-secret-CHANGE-IN-PROD')
+    configured_secret = os.environ.get('SECRET_KEY', '').strip()
+    if not configured_secret:
+        if os.environ.get('DEPLOYMENT_ENV', '').strip().casefold() == 'production':
+            raise RuntimeError('SECRET_KEY is required when DEPLOYMENT_ENV=production.')
+        configured_secret = secrets.token_hex(32)
+    app.secret_key = configured_secret
 
     # SQLite by default; override with DATABASE_URL env var for PostgreSQL/MySQL
     base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -24,6 +31,25 @@ def create_app(db_url: str | None = None) -> Flask:
     # Emailed security links are built from this trusted origin, never from
     # the request Host header. Set the public HTTPS origin when deploying.
     app.config['PUBLIC_BASE_URL'] = os.environ.get('PUBLIC_BASE_URL', 'http://127.0.0.1:5000')
+    app.config['DEPLOYMENT_ENV'] = os.environ.get('DEPLOYMENT_ENV', 'development').casefold()
+    app.config['STORAGE_BACKEND'] = os.environ.get('STORAGE_BACKEND', 'local')
+    app.config['STORAGE_BUCKET'] = os.environ.get('STORAGE_BUCKET', '')
+    app.config['STORAGE_PREFIX'] = os.environ.get('STORAGE_PREFIX', '')
+    app.config['STORAGE_ENDPOINT_URL'] = os.environ.get('STORAGE_ENDPOINT_URL', '')
+    app.config['STORAGE_REGION'] = os.environ.get('STORAGE_REGION', '')
+    app.config['MAP_TILE_MODE'] = os.environ.get('MAP_TILE_MODE', 'osm').casefold()
+    app.config['PMTILES_URL'] = os.environ.get('PMTILES_URL', '/static/maps/region.pmtiles')
+    app.config['MAP_TILE_URL'] = os.environ.get('MAP_TILE_URL', 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+    app.config['MAP_TILE_ATTRIBUTION'] = os.environ.get('MAP_TILE_ATTRIBUTION', '&copy; OpenStreetMap contributors')
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '').casefold() in {'1', 'true', 'yes'}
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(
+        minutes=max(15, int(os.environ.get('SESSION_LIFETIME_MINUTES', '480'))))
+    proxy_count = max(0, min(2, int(os.environ.get('TRUST_PROXY_COUNT', '0'))))
+    if proxy_count:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count,
+                                x_host=proxy_count, x_port=proxy_count)
 
     # ── Extensions ────────────────────────────────────────────────────────────
     from models import db, ActivityLog, User
@@ -42,7 +68,11 @@ def create_app(db_url: str | None = None) -> Flask:
 
     @app.context_processor
     def _security_template_context():
-        return {'csrf_token': _csrf_token}
+        return {'csrf_token': _csrf_token,
+                'map_tile_mode': app.config['MAP_TILE_MODE'],
+                'pmtiles_url': app.config['PMTILES_URL'],
+                'map_tile_url': app.config['MAP_TILE_URL'],
+                'map_tile_attribution': app.config['MAP_TILE_ATTRIBUTION']}
 
     def _clear_authenticated_session():
         """Clear authentication state without rotating the CSRF token."""
@@ -61,6 +91,18 @@ def create_app(db_url: str | None = None) -> Flask:
         """
         if 'user_id' not in session:
             return None
+        session.permanent = True
+        now = datetime.utcnow()
+        try:
+            last_activity = datetime.fromisoformat(session.get('_last_activity', ''))
+        except (TypeError, ValueError):
+            last_activity = now
+        if now - last_activity > app.config['PERMANENT_SESSION_LIFETIME']:
+            _clear_authenticated_session()
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Your session expired. Please sign in again.'}), 401
+            return redirect(url_for('login', next=request.path))
+        session['_last_activity'] = now.isoformat()
         # Public CSS/JS/images do not need an account query. Private uploaded
         # media is deliberately excluded and is validated here and below.
         if request.path.startswith('/static/') and not request.path.startswith('/static/uploads/'):
@@ -127,7 +169,7 @@ def create_app(db_url: str | None = None) -> Flask:
     #    single-process caveat. Times every single request; deliberately
     #    lightweight (in-memory, no DB write per request) so this doesn't
     #    become load of its own.
-    from load_monitor import record_request
+    from load_monitor_shared import record_request
 
     # The monitoring endpoints themselves (polled every 1s by the dashboard's
     # own live chart) must NOT be counted as "load" — otherwise the monitor
@@ -171,6 +213,39 @@ def create_app(db_url: str | None = None) -> Flask:
             response.headers['Cache-Control'] = 'private, max-age=86400'
             response.vary.add('Cookie')
         return response
+
+    @app.after_request
+    def _production_security_headers(response):
+        response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+        response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+        response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+        response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)')
+        response.headers.setdefault('Content-Security-Policy',
+            "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' https:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'")
+        if request.is_secure and os.environ.get('ENABLE_HSTS', 'true').casefold() in {'1', 'true', 'yes'}:
+            response.headers.setdefault('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+        return response
+
+    @app.get('/healthz')
+    def healthz():
+        return jsonify({'status': 'ok'})
+
+    @app.get('/readyz')
+    def readyz():
+        started = time.perf_counter()
+        checks, status_code = {}, 200
+        try:
+            db.session.execute(sql_text('SELECT 1'))
+            checks['database'] = 'ok'
+        except Exception as exc:
+            db.session.rollback(); checks['database'] = str(exc)[:160]; status_code = 503
+        try:
+            from storage_service import get_storage
+            checks['storage'] = get_storage().health()
+        except Exception as exc:
+            checks['storage'] = {'status': 'error', 'error': str(exc)[:160]}; status_code = 503
+        return jsonify({'status': 'ok' if status_code == 200 else 'degraded', 'checks': checks,
+                        'response_ms': round((time.perf_counter() - started) * 1000, 2)}), status_code
 
     from flask_migrate import Migrate
     Migrate(app, db)
@@ -245,14 +320,16 @@ def create_app(db_url: str | None = None) -> Flask:
         # Compatibility route for uploaded files. Access is checked against
         # the current user's project/line/tower permissions before Flask is
         # allowed to read anything from disk.
-        from flask import send_from_directory
         if 'user_id' not in session:
             return redirect(url_for('login', next=request.path))
         from access_control import can_access_upload
         if not can_access_upload(f'uploads/{filename}'):
             abort(403)
-        uploads_root = os.path.join(app.static_folder, 'uploads')
-        return send_from_directory(uploads_root, filename, max_age=86400)
+        from storage_service import get_storage
+        try:
+            return get_storage().response(f'uploads/{filename}', max_age=86400)
+        except (OSError, ValueError, RuntimeError):
+            abort(404)
 
     @app.route('/api/csrf-token')
     def api_csrf_token():
@@ -599,7 +676,7 @@ def create_app(db_url: str | None = None) -> Flask:
         assignment = PilotAssignment.query.filter_by(line_id=line_id, pilot_user_id=session.get('user_id')).first()
         if not assignment:
             return "This line isn't assigned to you.", 403
-        kml_url = f'/static/{line.kml_path}' if line.kml_path else ''
+        kml_url = f'/api/lines/{line.id}/geojson' if line.kml_path else ''
         return render_template('pilot_line_work.html',
             user_name=session['user_name'], line=line, kml_url=kml_url)
 
