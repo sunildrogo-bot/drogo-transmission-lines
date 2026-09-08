@@ -269,6 +269,7 @@
   .lightbox-img-wrap{
     position:relative;flex:0 0 auto;display:flex;justify-content:center;align-items:center;
     width:min(60vw, 860px);height:80vh;line-height:0;overflow:hidden;touch-action:none;margin:0 auto;
+    user-select:none;-webkit-user-select:none;
   }
   /* Zoom scope — ONLY this layer (image + shape overlay) scales/pans.
      Toolbar, zoom buttons, and thermal note live outside it in
@@ -278,7 +279,7 @@
   .lightbox-zoom-layer{position:relative;display:flex;justify-content:center;align-items:center;max-width:100%;max-height:100%;transform-origin:center center;transition:transform .12s ease-out;}
   .lightbox-zoom-layer.zoomed{cursor:grab;}
   .lightbox-zoom-layer.panning{cursor:grabbing;transition:none;}
-  .lightbox-img{display:block;max-width:100%;max-height:80vh;border-radius:6px;box-shadow:0 20px 60px rgba(0,0,0,.5);}
+  .lightbox-img{display:block;max-width:100%;max-height:80vh;border-radius:6px;box-shadow:0 20px 60px rgba(0,0,0,.5);-webkit-user-drag:none;user-select:none;-webkit-user-select:none;}
   .lightbox-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
   .lightbox-svg.drawing{pointer-events:auto;cursor:crosshair;}
   .lb-defect-shape{fill:rgba(224,20,20,.12);stroke:#e01414;stroke-width:.4;vector-effect:non-scaling-stroke;}
@@ -446,6 +447,10 @@
     color:rgba(255,255,255,.85);border:1px solid rgba(255,255,255,.18);
   }
   .lb-defect-chip b{color:#fff;}
+  .lb-defect-action{border:0;background:transparent;color:#9ec8ff;padding:2px 4px;margin-left:3px;font:700 10.5px var(--font);cursor:pointer;text-decoration:none;}
+  .lb-defect-action:hover{color:#fff;text-decoration:underline;}
+  .lb-defect-action.delete{color:#ff9b9b;}
+  .defect-type-search-note{font-size:10.5px;color:var(--text-muted);margin-top:5px;line-height:1.35;}
   .lb-defect-resolution{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:4px;}
   .lb-defect-resolution.open{background:rgba(224,165,58,.22);color:#e0c15a;}
   .lb-defect-resolution.closed{background:rgba(63,157,110,.22);color:#7fd9a8;}
@@ -617,7 +622,7 @@
     <button class="lightbox-nav lightbox-prev" id="lightbox-prev" onclick="lightboxPrev()" title="Previous">‹</button>
     <div class="lightbox-img-wrap" id="lightbox-img-wrap">
       <div class="lightbox-zoom-layer" id="lightbox-zoom-layer">
-        <img class="lightbox-img" id="lightbox-img" src="" alt=""/>
+        <img class="lightbox-img" id="lightbox-img" src="" alt="" draggable="false"/>
         <svg class="lightbox-svg" id="lightbox-svg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
       </div>
 
@@ -709,7 +714,7 @@
   <div class="lightbox-defect-panel" id="lightbox-defect-panel">
     <div class="ldp-inner">
       <div class="ldp-header">
-        <div class="ldp-title">Mark Defect</div>
+        <div class="ldp-title" id="df-panel-title">Mark Defect</div>
         <button type="button" class="ldp-close" onclick="cancelDefectForm()" title="Close">✕</button>
       </div>
       <div class="ldp-body">
@@ -726,6 +731,7 @@
         </div>
         <div class="field">
           <label>Defect Type</label>
+          <input type="search" id="df-defect-type-search" placeholder="Search defect type…" autocomplete="off" oninput="filterDefectTypeOptions(this.value)"/>
           <select id="df-defect-type" onchange="updateDefectStatusOptions()">
             <option value="">— Select —</option>
             <option>Abnormal Sound</option>
@@ -755,6 +761,7 @@
             <option>Earth Wire/OPGW Condition</option>
             <option>Earthing Wire Connected with Stub</option>
             <option>Encroachments in Row of Line</option>
+            <option>Grading Ring</option>
             <option>Hanger Cleat Nut Bolt Condition</option>
             <option>Hot Point Observed</option>
             <option>Insulator String Condition</option>
@@ -781,6 +788,7 @@
             <option>Tower Welding Condition</option>
             <option>Tree Cutting Spanwise</option>
           </select>
+          <div class="defect-type-search-note" id="df-defect-type-search-note">Type above to narrow the list.</div>
         </div>
         <div class="field">
           <label>Status</label>
@@ -800,6 +808,22 @@
             <option value="Not Connected">Not Connected</option>
             <option value="Needs Attention">Needs Attention</option>
             <option value="Not Applicable">Not Applicable</option>
+            <option value="Partially Missing">Partially Missing</option>
+            <option value="Rusted">Rusted</option>
+            <option value="Cut">Cut</option>
+            <option value="Disconnected">Disconnected</option>
+            <option value="Leaning">Leaning</option>
+            <option value="Exposed">Exposed</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Overheated">Overheated</option>
+            <option value="Oil Leakage">Oil Leakage</option>
+            <option value="Flashover Marks">Flashover Marks</option>
+            <option value="Obstructed">Obstructed</option>
+            <option value="Needs Repair">Needs Repair</option>
+            <option value="Needs Replacement">Needs Replacement</option>
+            <option value="Serviceable">Serviceable</option>
+            <option value="Unserviceable">Unserviceable</option>
+            <option value="Unable to Verify">Unable to Verify</option>
           </select>
         </div>
         <div class="field">
@@ -815,7 +839,7 @@
       </div>
       <div class="ldp-footer">
         <button type="button" class="btn-ghost" onclick="cancelDefectForm()">Cancel</button>
-        <button type="button" class="btn-primary" id="df-submit-btn" onclick="submitDefectForm()">Save</button>
+        <button type="button" class="btn-primary" id="df-submit-btn" onclick="submitDefectForm()">Save Defect</button>
       </div>
     </div>
   </div>
@@ -2777,6 +2801,7 @@ function renderLightboxImage() {
   const photo = currentFilteredPhotos[currentPhotoIndex];
   if (!photo) { closePhotoLightbox(); return; }
   const lightboxImg = document.getElementById('lightbox-img');
+  lightboxImg.onload = () => applyImgZoom();
   lightboxImg.onerror = () => {
     if (photo.thumbnail_url && lightboxImg.src !== new URL(photo.thumbnail_url, window.location.origin).href) {
       lightboxImg.src = photo.thumbnail_url;
@@ -2881,6 +2906,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 let inspectionTaxonomy = [];
+const UNIVERSAL_DEFECT_TYPES = ['Grading Ring'];
+const BASE_DEFECT_TYPE_OPTIONS = [...document.querySelectorAll('#df-defect-type option')]
+  .map(option => option.value).filter(Boolean);
+let availableDefectTypeOptions = [...BASE_DEFECT_TYPE_OPTIONS];
+
+function renderDefectTypeOptions(query = '', selectedValue = '') {
+  const select = document.getElementById('df-defect-type');
+  const normalized = query.trim().toLowerCase();
+  const matches = availableDefectTypeOptions.filter(name => !normalized || name.toLowerCase().includes(normalized));
+  select.innerHTML = '<option value="">— Select —</option>' +
+    matches.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+  if (matches.includes(selectedValue)) select.value = selectedValue;
+  const note = document.getElementById('df-defect-type-search-note');
+  if (note) note.textContent = normalized
+    ? `${matches.length} matching defect type${matches.length === 1 ? '' : 's'}`
+    : `${availableDefectTypeOptions.length} defect types available`;
+  updateDefectStatusOptions();
+}
+
+function filterDefectTypeOptions(query) {
+  const selected = document.getElementById('df-defect-type').value;
+  renderDefectTypeOptions(query, selected);
+}
+
 async function loadInspectionTaxonomyOptions() {
   try {
     const res = await fetch('/api/inspection-taxonomy/active');
@@ -2892,16 +2941,22 @@ async function loadInspectionTaxonomyOptions() {
   } catch (e) { /* legacy free-text behaviour remains available */ }
 }
 
-function applyTaxonomyDefectOptions() {
-  if (!inspectionTaxonomy.length) return;
+function applyTaxonomyDefectOptions(selectedValue) {
   const componentName = document.getElementById('df-component').value.trim();
   const component = inspectionTaxonomy.find(row => row.name.toLowerCase() === componentName.toLowerCase());
-  if (!component) return;
   const select = document.getElementById('df-defect-type');
-  const previous = select.value;
-  select.innerHTML = '<option value="">— Select —</option>' + (component.defect_types || []).map(row => `<option value="${escapeHtml(row.name)}">${escapeHtml(row.name)}</option>`).join('');
-  if ([...select.options].some(option => option.value === previous)) select.value = previous;
-  updateDefectStatusOptions();
+  const explicitSelection = typeof selectedValue === 'string';
+  const previous = explicitSelection ? selectedValue : select.value;
+  const configured = component ? (component.defect_types || []).map(row => row.name).filter(Boolean) : BASE_DEFECT_TYPE_OPTIONS;
+  availableDefectTypeOptions = [...new Set([...configured, ...UNIVERSAL_DEFECT_TYPES])];
+  // An older saved value must remain editable even if the Admin later
+  // retires it from taxonomy. The server still validates new selections.
+  if (explicitSelection && previous && !availableDefectTypeOptions.includes(previous)) {
+    availableDefectTypeOptions.push(previous);
+  }
+  const search = document.getElementById('df-defect-type-search');
+  if (search) search.value = '';
+  renderDefectTypeOptions('', previous);
 }
 
 // ── Photo zoom — scoped ONLY to the image (lightbox-zoom-layer), never
@@ -2916,12 +2971,37 @@ let imgPanX = 0, imgPanY = 0, isImgPanning = false, panStartX = 0, panStartY = 0
 function applyImgZoom() {
   const layer = document.getElementById('lightbox-zoom-layer');
   if (!layer) return;
+  clampImgPan();
   layer.style.transform = `translate(${imgPanX}px, ${imgPanY}px) scale(${imgZoom})`;
   layer.classList.toggle('zoomed', imgZoom > 1);
 }
 
-function zoomImage(dir) {
+function clampImgPan() {
+  const wrap = document.getElementById('lightbox-img-wrap');
+  const layer = document.getElementById('lightbox-zoom-layer');
+  if (!wrap || !layer) return;
+  const maxX = Math.max(0, (layer.offsetWidth * imgZoom - wrap.clientWidth) / 2);
+  const maxY = Math.max(0, (layer.offsetHeight * imgZoom - wrap.clientHeight) / 2);
+  imgPanX = Math.max(-maxX, Math.min(maxX, imgPanX));
+  imgPanY = Math.max(-maxY, Math.min(maxY, imgPanY));
+}
+
+function zoomImage(dir, clientX = null, clientY = null) {
+  const previousZoom = imgZoom;
   imgZoom = Math.max(IMG_ZOOM_MIN, Math.min(IMG_ZOOM_MAX, +(imgZoom + dir * IMG_ZOOM_STEP).toFixed(2)));
+  // Keep the point beneath the mouse stable while zooming, rather than
+  // jumping the image back toward the centre on every wheel step.
+  if (clientX !== null && clientY !== null && imgZoom !== previousZoom) {
+    const wrap = document.getElementById('lightbox-img-wrap');
+    if (wrap) {
+      const rect = wrap.getBoundingClientRect();
+      const pointerX = clientX - (rect.left + rect.width / 2);
+      const pointerY = clientY - (rect.top + rect.height / 2);
+      const ratio = imgZoom / previousZoom;
+      imgPanX = pointerX - (pointerX - imgPanX) * ratio;
+      imgPanY = pointerY - (pointerY - imgPanY) * ratio;
+    }
+  }
   if (imgZoom === IMG_ZOOM_MIN) { imgPanX = 0; imgPanY = 0; }
   applyImgZoom();
 }
@@ -2947,43 +3027,49 @@ function openOriginalImage() {
   const layer = document.getElementById('lightbox-zoom-layer');
   if (!lightbox || !wrap || !layer) return;
 
-  // Wheel = zoom, and ALWAYS prevented here (even at 1x) so a stray
-  // ctrl+scroll or trackpad gesture over the photo can't fall through to
-  // the browser and zoom the whole page. Listens on the WHOLE lightbox,
-  // not just the image itself — the toolbar/colorbar/params/measurements
-  // boxes are fixed-position UI floating over the image area, so
-  // scrolling while the cursor happens to be over one of them needs to
-  // zoom the image too, not silently do nothing (or worse, let the
-  // gesture fall through to the browser) just because the cursor wasn't
-  // precisely over the photo pixels.
-  lightbox.addEventListener('wheel', (e) => {
-    // Scrollable side panels (Measurements table, Parameters box) need
-    // their OWN native scroll — only zoom the photo when the wheel event
-    // isn't inside one of those, otherwise scrolling a long measurements
-    // list is impossible (every scroll tick zooms the image instead).
-    if (e.target.closest('.lb-thermal-measurements-box, .lb-thermal-params-box')) return;
+  // Wheel zoom applies only over the photo/annotation layer. Side panels,
+  // forms and toolbars keep their normal scrolling behaviour.
+  wrap.addEventListener('wheel', (e) => {
+    if (!e.target.closest('#lightbox-zoom-layer')) return;
     e.preventDefault();
-    zoomImage(e.deltaY < 0 ? 1 : -1);
+    zoomImage(e.deltaY < 0 ? 1 : -1, e.clientX, e.clientY);
   }, { passive: false });
 
-  // Drag-to-pan once zoomed in — disabled while actively marking a
-  // defect, so a drag there places/moves shape points instead of panning.
-  layer.addEventListener('mousedown', (e) => {
-    if (imgZoom <= 1 || markDefectMode) return;
+  // Pointer events provide consistent mouse, pen and middle-button panning.
+  // Annotation and thermal drawing modes retain exclusive control.
+  wrap.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('#lightbox-zoom-layer')) return;
+    if (imgZoom <= 1 || markDefectMode || thermalMeasureMode || ![0, 1].includes(e.button)) return;
+    e.preventDefault();
     isImgPanning = true;
     panStartX = e.clientX - imgPanX;
     panStartY = e.clientY - imgPanY;
+    wrap.setPointerCapture?.(e.pointerId);
     layer.classList.add('panning');
   });
-  window.addEventListener('mousemove', (e) => {
+  wrap.addEventListener('pointermove', (e) => {
     if (!isImgPanning) return;
+    e.preventDefault();
     imgPanX = e.clientX - panStartX;
     imgPanY = e.clientY - panStartY;
     applyImgZoom();
   });
-  window.addEventListener('mouseup', () => {
+  const stopPanning = (e) => {
+    if (e?.pointerId !== undefined && wrap.hasPointerCapture?.(e.pointerId)) {
+      wrap.releasePointerCapture(e.pointerId);
+    }
     isImgPanning = false;
     layer.classList.remove('panning');
+  };
+  wrap.addEventListener('pointerup', stopPanning);
+  wrap.addEventListener('pointercancel', stopPanning);
+  layer.addEventListener('dragstart', (e) => e.preventDefault());
+
+  // Suppress native browser selection/drag behaviour (the blue flash)
+  // without assigning an unexpected action to double-click.
+  wrap.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    window.getSelection?.().removeAllRanges();
   });
 
   // Two-finger pinch (mobile) — scoped the same way as wheel, and
@@ -3000,7 +3086,7 @@ function openOriginalImage() {
       pinchStartZoom = imgZoom;
     }
   }, { passive: false });
-  lightbox.addEventListener('touchmove', (e) => {
+  wrap.addEventListener('touchmove', (e) => {
     if (e.touches.length === 2 && pinchStartDist) {
       e.preventDefault();
       const scale = touchDist(e.touches) / pinchStartDist;
@@ -3008,7 +3094,7 @@ function openOriginalImage() {
       applyImgZoom();
     }
   }, { passive: false });
-  lightbox.addEventListener('touchend', (e) => {
+  wrap.addEventListener('touchend', (e) => {
     if (e.touches.length < 2) pinchStartDist = null;
   });
 })();
@@ -3024,6 +3110,7 @@ let markDefectMode = false;
 let activeDefectTool = null;
 let defectDrawPoints = [];  // {x, y} in percent-of-image coordinates (0-100)
 let pendingShape = null;    // { shape_type, shape_coords } staged while the form is open
+let editingDefectId = null; // existing annotation whose details are being edited
 
 async function loadPhotoDefects(photoId) {
   try {
@@ -3107,7 +3194,7 @@ function renderDefectChips() {
       <b>${escapeHtml(d.component_name || 'Defect')}</b>${d.location ? ' · ' + escapeHtml(d.location) : ''} · ${escapeHtml(d.severity)} · ${escapeHtml(d.status || 'OK')}
       <span class="lb-defect-resolution ${isClosed ? 'closed' : 'open'}" title="${isClosed ? escapeHtml((d.resolved_by ? 'Closed by ' + d.resolved_by + '. ' : '') + (d.resolution_comment || '')) : ''}">${isClosed ? '✓ Closed' : 'Open'}</span>
       ${(d.resolution_history || []).length ? ` <a href="javascript:void(0)" onclick="showDefectHistory(${d.id})" style="color:var(--accent);text-decoration:none;font-size:11px;font-weight:700;">History (${d.resolution_history.length})</a>` : ''}
-      ${CAN_INSPECT ? ` <a href="javascript:void(0)" onclick="deleteTowerDefect(${d.id})" style="color:#f88;text-decoration:none;">✕</a>` : ''}
+      ${CAN_INSPECT ? ` <button type="button" class="lb-defect-action" onclick="startEditDefect(${d.id})" title="Edit defect details">Edit</button><button type="button" class="lb-defect-action delete" onclick="deleteTowerDefect(${d.id})" title="Delete defect">Delete</button>` : ''}
     </span>`;
   }).join('');
 }
@@ -3174,8 +3261,20 @@ async function deleteTowerDefect(id) {
     const data = await res.json();
     if (!res.ok) { showToast(data.error || 'Could not delete defect.'); return; }
     const photo = currentFilteredPhotos[currentPhotoIndex];
-    if (photo) loadPhotoDefects(photo.id);
-    loadTowerPhotos();
+    // Remove the deleted annotation from the visible state immediately;
+    // the following reload verifies the server state without leaving the
+    // old shape/chip or marked-defect badge on screen in the meantime.
+    currentPhotoDefects = currentPhotoDefects.filter(item => item.id !== id);
+    if (currentFocusDefectId === id) currentFocusDefectId = null;
+    renderDefectShapes();
+    renderDefectChips();
+    if (photo) {
+      photo.defect_count = Math.max(0, Number(photo.defect_count || 0) - 1);
+      await loadPhotoDefects(photo.id);
+    }
+    await loadTowerPhotos();
+    refreshPhotoDotsForCurrentLine();
+    showToast('Defect deleted.', 'success');
   } catch (e) {
     showToast('Could not delete defect.');
   }
@@ -3655,6 +3754,7 @@ const DEFECT_STATUS_OPTIONS = {
   'Earth Wire/OPGW Condition': ['Good', 'Fair', 'Poor'],
   'Earthing Wire Connected with Stub': ['Connected', 'Not Connected', 'Damaged'],
   'Encroachments in Row of Line': ['No', 'Yes'],
+  'Grading Ring': ['OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Corroded'],
   'Hanger Cleat Nut Bolt Condition': ['OK', 'Missing', 'Loose'],
   'Hot Point Observed': ['No', 'Yes'],
   'Insulator String Condition': ['Good', 'Fair', 'Poor'],
@@ -3685,9 +3785,13 @@ const COMMON_DEFECT_STATUS_OPTIONS = [
   'OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Cracked', 'Corroded',
   'Bent', 'Displaced', 'Deformed', 'Burnt', 'Contaminated',
   'Not Connected', 'Needs Attention', 'Not Applicable',
+  'Partially Missing', 'Rusted', 'Cut', 'Disconnected', 'Leaning',
+  'Exposed', 'Dirty', 'Overheated', 'Oil Leakage', 'Flashover Marks',
+  'Obstructed', 'Needs Repair', 'Needs Replacement', 'Serviceable',
+  'Unserviceable', 'Unable to Verify',
 ];
 
-function updateDefectStatusOptions() {
+function updateDefectStatusOptions(selectedValue) {
   const type = document.getElementById('df-defect-type').value;
   const preferred = DEFECT_STATUS_OPTIONS[type] || [];
   // Keep the technically relevant answers first, then make the complete
@@ -3695,21 +3799,40 @@ function updateDefectStatusOptions() {
   const options = [...new Set([...preferred, ...COMMON_DEFECT_STATUS_OPTIONS])];
   const statusSelect = document.getElementById('df-status');
   statusSelect.innerHTML = options.map(o => `<option value="${o}">${o}</option>`).join('');
+  if (selectedValue && !options.includes(selectedValue)) {
+    statusSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(selectedValue)}">${escapeHtml(selectedValue)}</option>`);
+  }
+  if (selectedValue) statusSelect.value = selectedValue;
 }
 
-function openDefectForm() {
-  document.getElementById('df-component').value = '';
-  document.getElementById('df-location').value = 'Top';
-  document.getElementById('df-defect-type').value = '';
-  updateDefectStatusOptions();
-  document.getElementById('df-severity').value = 'Minor';
-  document.getElementById('df-comments').value = '';
+function openDefectForm(defect = null) {
+  editingDefectId = defect ? defect.id : null;
+  if (defect) pendingShape = null;
+  document.getElementById('df-panel-title').textContent = defect ? 'Edit Defect' : 'Mark Defect';
+  document.getElementById('df-submit-btn').textContent = defect ? 'Save Changes' : 'Save Defect';
+  document.getElementById('df-component').value = defect?.component_name || '';
+  document.getElementById('df-location').value = defect?.location || 'Top';
+  applyTaxonomyDefectOptions(defect?.defect_type || '');
+  updateDefectStatusOptions(defect?.status || 'OK');
+  document.getElementById('df-severity').value = defect?.severity || 'Minor';
+  document.getElementById('df-comments').value = defect?.comments || '';
   document.getElementById('df-error').style.display = 'none';
   document.getElementById('lightbox-defect-panel').classList.add('open');
 }
 
+function startEditDefect(id) {
+  const defect = currentPhotoDefects.find(item => item.id === id);
+  if (!defect) { showToast('This defect is no longer available.'); return; }
+  markDefectMode = false;
+  const markBtn = document.getElementById('lb-mark-btn');
+  if (markBtn) markBtn.textContent = 'Start Marking';
+  cancelDefectMarking();
+  openDefectForm(defect);
+}
+
 function cancelDefectForm() {
   document.getElementById('lightbox-defect-panel').classList.remove('open');
+  editingDefectId = null;
   pendingShape = null;
   defectDrawPoints = [];
   clearDrawPreview();
@@ -3725,7 +3848,8 @@ function cancelDefectForm() {
 
 async function submitDefectForm() {
   const closePanel = () => document.getElementById('lightbox-defect-panel').classList.remove('open');
-  if (!pendingShape) { closePanel(); return; }
+  const editId = editingDefectId;
+  if (!editId && !pendingShape) { closePanel(); return; }
   const photo = currentFilteredPhotos[currentPhotoIndex];
   if (!photo) { closePanel(); return; }
 
@@ -3733,8 +3857,6 @@ async function submitDefectForm() {
   errBox.style.display = 'none';
 
   const body = {
-    shape_type: pendingShape.shape_type,
-    shape_coords: pendingShape.shape_coords,
     component_name: document.getElementById('df-component').value.trim(),
     location: document.getElementById('df-location').value,
     defect_type: document.getElementById('df-defect-type').value.trim(),
@@ -3742,12 +3864,19 @@ async function submitDefectForm() {
     severity: document.getElementById('df-severity').value,
     comments: document.getElementById('df-comments').value.trim(),
   };
+  if (editId) {
+    const existing = currentPhotoDefects.find(item => item.id === editId);
+    body.version = existing?.version;
+  } else {
+    body.shape_type = pendingShape.shape_type;
+    body.shape_coords = pendingShape.shape_coords;
+  }
 
   const btn = document.getElementById('df-submit-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    const res = await fetch(`/api/tower-photos/${photo.id}/defects`, {
-      method: 'POST',
+    const res = await fetch(editId ? `/api/tower-defects/${editId}` : `/api/tower-photos/${photo.id}/defects`, {
+      method: editId ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -3759,15 +3888,23 @@ async function submitDefectForm() {
     }
     closePanel();
     pendingShape = null;
+    editingDefectId = null;
     cancelDefectMarking();
-    loadPhotoDefects(photo.id);
+    if (editId) {
+      currentPhotoDefects = currentPhotoDefects.map(item => item.id === editId ? data : item);
+      renderDefectShapes();
+      renderDefectChips();
+      showToast('Defect updated.', 'success');
+    } else {
+      loadPhotoDefects(photo.id);
+    }
     loadTowerPhotos();
     refreshPhotoDotsForCurrentLine();
   } catch (e) {
     errBox.textContent = 'Network error — please try again.';
     errBox.style.display = 'block';
   } finally {
-    btn.disabled = false; btn.textContent = 'Save Defect';
+    btn.disabled = false; btn.textContent = editingDefectId ? 'Save Changes' : 'Save Defect';
   }
 }
 

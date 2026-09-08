@@ -1,7 +1,7 @@
 """Required-feature registry used by Settings and the safe release builder."""
 from pathlib import Path
 
-APPLICATION_VERSION = '1.26.0'
+APPLICATION_VERSION = '1.27.0'
 
 FEATURES = (
     ('admin_dashboard', 'Admin Dashboard', 'templates/admin.html', 'api/dashboard/summary'),
@@ -32,6 +32,9 @@ FEATURES = (
     ('workflow_regression', 'End-to-end workflow regression', 'tests/test_workflow_end_to_end.py', 'test_upload_inspect_release_client_close_report_and_dataset_preview'),
     ('storage_control_centre', 'Uploads and Storage control centre', 'templates/settings.html', 'project-data-grid'),
     ('transmission_card_covers', 'Transmission project and division covers', 'static/js/projects.js', 'marketing_rgb.jpg'),
+    ('defect_edit_search', 'Editable and searchable defect records', 'templates/project_map.html', 'startEditDefect'),
+    ('active_defect_consistency', 'Soft-deleted defects excluded from active results', 'models.py', 'active_defects ='),
+    ('image_viewer_controls', 'Scoped image zoom and pointer panning', 'templates/project_map.html', "wrap.addEventListener('pointerdown'"),
 )
 
 

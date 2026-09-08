@@ -512,7 +512,8 @@ class TowerPhoto(db.Model):
         # empty grid tile. Not fast for that one photo, but never broken.
         thumb_path = self.thumbnail_path or display_path
         thermal = self.is_thermal_image()
-        has_finding = bool(self.thermal_points) if thermal else bool(self.defects)
+        active_defects = [defect for defect in self.defects if not defect.deleted_at]
+        has_finding = bool(self.thermal_points) if thermal else bool(active_defects)
         effective_review = ('Measured' if thermal else 'Defect marked') if has_finding else (self.review_outcome or 'Pending')
         try:
             validation_warnings = json.loads(self.validation_warnings_json or '[]')
@@ -530,7 +531,7 @@ class TowerPhoto(db.Model):
             'thumbnail_url': stored_url(thumb_path),
             'uploaded_by': self.uploaded_by or '',
             'created_at':  self.created_at.strftime('%d %b %Y %H:%M') if self.created_at else '',
-            'defect_count': len(self.defects),
+            'defect_count': len(active_defects),
             'gps_lat':     self.gps_lat,
             'gps_lng':     self.gps_lng,
             'has_defect_copy': bool(self.defect_copy_path),

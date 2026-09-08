@@ -164,7 +164,9 @@ def tool_list_tower_defects(project_name, line_name, tower_label):
     photo_ids = [p.id for p in photos]
     if not photo_ids:
         return {'defects': [], 'note': 'No photos uploaded for this tower yet.'}
-    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all()
+    defects = (TowerDefect.query
+               .filter(TowerDefect.tower_photo_id.in_(photo_ids),
+                       TowerDefect.deleted_at.is_(None)).all())
     return {'defects': [{
         'id': d.id, 'component_name': d.component_name, 'defect_type': d.defect_type,
         'location': d.location, 'severity': d.severity,
@@ -181,7 +183,7 @@ def tool_search_defects(project_name, severity=None, status=None, component_name
     if not line_ids:
         return {'defects': []}
     q = (TowerDefect.query.join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
-         .filter(TowerPhoto.line_id.in_(line_ids)))
+         .filter(TowerPhoto.line_id.in_(line_ids), TowerDefect.deleted_at.is_(None)))
     if severity:
         q = q.filter(TowerDefect.severity == severity)
     if status:
@@ -230,7 +232,9 @@ def tool_generate_tower_report(project_name, line_name, tower_label):
     import projects_routes as pr
     photos = TowerPhoto.query.filter_by(line_id=line.id, tower_label=str(tower_label)).all()
     photo_ids = [p.id for p in photos]
-    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all() if photo_ids else []
+    defects = (TowerDefect.query
+               .filter(TowerDefect.tower_photo_id.in_(photo_ids),
+                       TowerDefect.deleted_at.is_(None)).all()) if photo_ids else []
     photo_by_id = {p.id: p for p in photos}
     defect_dicts = []
     for d in defects:

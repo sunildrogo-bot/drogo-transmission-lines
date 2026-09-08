@@ -627,7 +627,7 @@ def api_settings_line_towers(line_id):
     for photo in TowerPhoto.query.filter_by(line_id=line_id).all():
         t = towers.setdefault(photo.tower_label, {'label': photo.tower_label, 'photo_count': 0, 'defect_count': 0})
         t['photo_count'] += 1
-        t['defect_count'] += len(photo.defects)
+        t['defect_count'] += sum(1 for defect in photo.defects if not defect.deleted_at)
     rows = sorted(towers.values(), key=lambda t: t['label'])
     return jsonify({'line_name': line.name, 'towers': rows})
 

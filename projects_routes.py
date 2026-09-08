@@ -465,6 +465,7 @@ def _duplicate_photo_for_defects(photo):
         return True
     if not photo.image_path:
         return False
+    base_dir = current_app.root_path if hasattr(current_app, 'root_path') else '.'
     src = _storage_working_path(photo.image_path)
     if not src:
         return False
@@ -476,7 +477,7 @@ def _duplicate_photo_for_defects(photo):
         # existed) have no /raw suffix to swap — give them their own
         # defects/ sibling next to wherever they actually live instead.
         defects_rel_dir = raw_dir + '_defects'
-    dest_dir = os.path.join(current_app.static_folder, *defects_rel_dir.split('/'))
+    dest_dir = os.path.join(base_dir, 'static', defects_rel_dir)
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, filename)
     if not os.path.isfile(dest):
@@ -2400,7 +2401,7 @@ def api_tower_summary(line_id):
     defect_counts = dict(
         db.session.query(TowerPhoto.tower_label, db.func.count(TowerDefect.id))
         .join(TowerDefect, TowerDefect.tower_photo_id == TowerPhoto.id)
-        .filter(TowerPhoto.line_id == line_id)
+        .filter(TowerPhoto.line_id == line_id, TowerDefect.deleted_at.is_(None))
         .group_by(TowerPhoto.tower_label)
         .all()
     )
@@ -3113,16 +3114,37 @@ def api_delete_corridor_photo(photo_id):
 VALID_SHAPE_TYPES = {'polygon', 'rect', 'circle'}
 VALID_LOCATIONS = {'Top', 'Middle', 'Bottom', 'Left', 'Right'}
 VALID_SEVERITIES = {'Minor', 'Major', 'Critical'}
+SYSTEM_DEFECT_TYPES = {'Grading Ring'}
 VALID_DEFECT_STATUSES = {
     # Common physical/component conditions.
     'OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Cracked', 'Corroded',
     'Bent', 'Displaced', 'Deformed', 'Burnt', 'Contaminated',
     'Not Connected', 'Needs Attention', 'Not Applicable',
+    'Partially Missing', 'Rusted', 'Cut', 'Disconnected', 'Leaning',
+    'Exposed', 'Dirty', 'Overheated', 'Oil Leakage', 'Flashover Marks',
+    'Obstructed', 'Needs Repair', 'Needs Replacement', 'Serviceable',
+    'Unserviceable', 'Unable to Verify',
     # Defect-specific inspection results retained by the UI.
     'No', 'Yes', 'Issue Found', 'Not Required', 'Required', 'Done',
     'Good', 'Fair', 'Poor', 'Within Limit', 'Not Within Limit',
     'Connected', 'None Missing', 'Parts Missing',
 }
+
+
+def _defect_taxonomy_error(component_name, defect_type):
+    """Validate a component/type pair without blocking built-in universal types."""
+    configured_component = InspectionComponent.query.filter_by(
+        name=component_name, active=True,
+    ).first()
+    if InspectionComponent.query.filter_by(active=True).first() and not configured_component:
+        return 'Select an active component from the controlled inspection taxonomy.'
+    if configured_component and defect_type not in SYSTEM_DEFECT_TYPES:
+        taxonomy_type = (InspectionDefectType.query
+                         .filter_by(component_id=configured_component.id,
+                                    name=defect_type, active=True).first())
+        if not taxonomy_type:
+            return 'The selected defect type is not active for this component.'
+    return ''
 
 
 def _defect_snapshot(defect):
@@ -3210,18 +3232,9 @@ def api_create_tower_defect(photo_id):
     if not defect_type:
         return jsonify({'error': 'Select a defect type before saving the annotation.'}), 400
 
-    taxonomy_type = (InspectionDefectType.query.join(InspectionComponent)
-                     .filter(InspectionComponent.name == component_name,
-                             InspectionDefectType.name == defect_type,
-                             InspectionComponent.active.is_(True),
-                             InspectionDefectType.active.is_(True)).first())
-    # Existing installations may not have activated taxonomy yet. Once the
-    # matching component exists, reject names outside its controlled list.
-    configured_component = InspectionComponent.query.filter_by(name=component_name, active=True).first()
-    if InspectionComponent.query.filter_by(active=True).first() and not configured_component:
-        return jsonify({'error': 'Select an active component from the controlled inspection taxonomy.'}), 400
-    if configured_component and not taxonomy_type:
-        return jsonify({'error': 'The selected defect type is not active for this component.'}), 400
+    taxonomy_error = _defect_taxonomy_error(component_name, defect_type)
+    if taxonomy_error:
+        return jsonify({'error': taxonomy_error}), 400
 
     defect = TowerDefect(
         tower_photo_id=photo_id,
@@ -3266,6 +3279,8 @@ def api_resolve_tower_defect(defect_id):
     if guard:
         return guard
     defect = TowerDefect.query.get_or_404(defect_id)
+    if defect.deleted_at:
+        return jsonify({'error': 'This annotation has been deleted.'}), 409
     guard = _photo_access_guard(defect.tower_photo_id)
     if guard:
         return guard
@@ -3369,21 +3384,42 @@ def api_update_tower_defect(defect_id):
         return jsonify({'error': 'Restore this annotation before editing it.'}), 409
     data = request.get_json(force=True, silent=True) or {}
     expected_version = data.get('version')
-    if expected_version is not None and int(expected_version) != (defect.version or 1):
+    try:
+        version_mismatch = (expected_version is not None and
+                            int(expected_version) != (defect.version or 1))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'A valid annotation version is required.'}), 400
+    if version_mismatch:
         return jsonify({'error': 'This annotation was changed by another user. Reload it before saving.',
                         'current': defect.to_dict()}), 409
-    before = _defect_snapshot(defect)
-    for field, limit in (('component_name', 150), ('defect_type', 100), ('comments', 2000),
-                         ('observation', 255), ('status', 40), ('location', 20)):
-        if field in data:
-            setattr(defect, field, (data.get(field) or '').strip()[:limit])
-    if 'severity' in data:
-        severity = (data.get('severity') or '').strip()
-        if severity not in VALID_SEVERITIES:
-            return jsonify({'error': 'Severity must be Minor, Major or Critical.'}), 400
-        defect.severity = severity
-    if not defect.component_name or not defect.defect_type:
+
+    component_name = (data.get('component_name', defect.component_name) or '').strip()[:150]
+    defect_type = (data.get('defect_type', defect.defect_type) or '').strip()[:100]
+    location = (data.get('location', defect.location) or '').strip()[:20]
+    status = (data.get('status', defect.status or 'OK') or '').strip()[:20]
+    severity = (data.get('severity', defect.severity or 'Minor') or '').strip()
+    if not component_name or not defect_type:
         return jsonify({'error': 'Component and defect type are required.'}), 400
+    if location and location not in VALID_LOCATIONS:
+        return jsonify({'error': 'location must be one of: Top, Middle, Bottom, Left, Right.'}), 400
+    if status not in VALID_DEFECT_STATUSES:
+        return jsonify({'error': 'Select a valid defect condition status.'}), 400
+    if severity not in VALID_SEVERITIES:
+        return jsonify({'error': 'Severity must be Minor, Major or Critical.'}), 400
+    taxonomy_error = _defect_taxonomy_error(component_name, defect_type)
+    if taxonomy_error:
+        return jsonify({'error': taxonomy_error}), 400
+
+    before = _defect_snapshot(defect)
+    defect.component_name = component_name
+    defect.defect_type = defect_type
+    defect.location = location
+    defect.status = status
+    defect.severity = severity
+    if 'comments' in data:
+        defect.comments = (data.get('comments') or '').strip()[:2000]
+    if 'observation' in data:
+        defect.observation = (data.get('observation') or '').strip()[:255]
     defect.version = (defect.version or 1) + 1
     after = _defect_snapshot(defect)
     _annotation_event(defect, 'update', before=before, after=after)
