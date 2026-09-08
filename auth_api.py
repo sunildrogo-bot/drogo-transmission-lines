@@ -15,7 +15,7 @@ CORS or cross-site-cookie configuration needed either way. See
 frontend/vite.config.js.
 """
 from datetime import datetime
-from flask import Blueprint, request, jsonify, session, url_for
+from flask import Blueprint, request, jsonify, session, url_for, make_response
 
 import users as user_store
 from models import db, ActivityLog
@@ -41,9 +41,27 @@ def api_login():
     password = data.get('password') or ''
     login_as = data.get('login_as') or 'Client User'
 
+    from security_controls import clear_login_failures, login_limit, record_login_failure
+    limited, retry_after = login_limit(email)
+    if limited:
+        response = make_response(jsonify({
+            'error': 'Too many unsuccessful login attempts. Please wait and try again.'
+        }), 429)
+        response.headers['Retry-After'] = str(retry_after)
+        return response
+
     user, error = user_store.authenticate(email, password, login_as=login_as)
     if not user:
+        now_limited, retry_after = record_login_failure(email)
+        if now_limited:
+            response = make_response(jsonify({
+                'error': 'Too many unsuccessful login attempts. Please wait and try again.'
+            }), 429)
+            response.headers['Retry-After'] = str(retry_after)
+            return response
         return jsonify({'error': error or 'Invalid email or password.'}), 401
+
+    clear_login_failures(email)
 
     session['user_id']    = user['id']
     session['user_name']  = user['username']
@@ -51,6 +69,7 @@ def api_login():
     session['role']       = login_as
     session['all_roles']  = user['roles']
     session['modules']    = user['modules']
+    session['session_version'] = int(user.get('session_version') or 1)
     session['login_at']   = datetime.utcnow().isoformat()
 
     user_store.record_login(user['id'])
@@ -73,7 +92,10 @@ def api_logout():
             db.session.commit()
         except Exception:
             pass
+    csrf_token = session.get('_csrf_token')
     session.clear()
+    if csrf_token:
+        session['_csrf_token'] = csrf_token
     return jsonify({'ok': True})
 
 
@@ -114,7 +136,10 @@ def api_dashboard():
 
     assigned = session.get('modules', [])
     cards = []
+    from access_control import has_module_access
     for m in assigned:
+        if not has_module_access(m):
+            continue
         route = user_store.MODULE_ROUTES.get(m)
         if not route:
             continue

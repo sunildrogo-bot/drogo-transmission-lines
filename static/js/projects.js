@@ -1,6 +1,4 @@
-/* projects.js — shared "Add Project" + dynamic project-grid logic.
-   Used by projects.html (Transmission Line) and land_survey_dashboard.html
-   (Land Survey), and any future module listing page. */
+/* projects.js — shared "Add Project" + dynamic project-grid logic. */
 
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -82,9 +80,9 @@ async function submitAddProject() {
   }
 }
 
-/* Default cover photo for project cards — the same transmission-line image
-   used across the static/legacy pages (DVC, Kothegudam, Land Survey banner). */
-const DEFAULT_COVER_IMAGE = 'https://images.pexels.com/photos/32599646/pexels-photo-32599646.jpeg?auto=compress&cs=tinysrgb&w=800';
+/* Local transmission-line cover keeps project cards consistent and removes
+   their former dependency on Land Survey/remote placeholder imagery. */
+const DEFAULT_COVER_IMAGE = '/static/images/marketing_rgb.jpg';
 
 function deleteProjectCard(event, id, name) {
   event.preventDefault();
@@ -99,7 +97,7 @@ function deleteProjectCard(event, id, name) {
 function projectCardHtml(p) {
   const banner = p.legacy_banner || DEFAULT_COVER_IMAGE;
   const href = p.legacy_route ? `/${p.legacy_route}` :
-    ((window.CURRENT_MODULE === 'Transmission Line' || window.CURRENT_MODULE === 'TRANS') ? `/projects/${p.id}/map` : `/projects/${p.id}/info`);
+    ((window.CURRENT_MODULE === 'Transmission Line' || window.CURRENT_MODULE === 'TRANS') ? `/projects/${p.id}/divisions` : `/projects/${p.id}/info`);
   const lineBadge = p.legacy_route
     ? ''
     : `<span class="card-lines-badge">${p.division_count} division(s) · ${p.line_count} line(s)</span>`;

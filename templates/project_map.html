@@ -163,10 +163,8 @@
   }
   .pm-tower-row:last-child{border-bottom:none;}
   .pm-tower-row:hover{background:var(--bg-elevated-2);}
-  /* Non-matching rows dim in place instead of collapsing (display:none) —
-     collapsing shifted every row below it up the list on every keystroke,
-     which read as the tower labels themselves jumping around while typing. */
-  .pm-tower-row.no-match{opacity:.28;pointer-events:none;}
+  /* Filters must show only the requested towers. */
+  .pm-tower-row.no-match{display:none;}
   .pm-tower-row-main{display:flex;align-items:center;gap:7px;min-width:0;flex:1;}
   .pm-tower-row-label{font-weight:700;flex-shrink:0;min-width:34px;}
   .pm-tower-row-status{
@@ -227,6 +225,12 @@
   .tp-photo-type-tab:hover{border-color:var(--accent);color:var(--text-primary);}
   .tp-photo-type-tab.active{background:rgba(24,26,30,.08);border-color:var(--accent);color:var(--accent);}
   .tp-photo-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .tp-review-progress{margin:8px 0;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text-muted);}
+  .tp-review-bar{height:6px;background:var(--bg-elevated-2);border-radius:6px;overflow:hidden;margin:6px 0;}
+  .tp-review-fill{height:100%;background:var(--success);}
+  .tp-review-actions{display:flex;gap:6px;flex-wrap:wrap;}
+  .tp-review-actions button{font-size:10.5px;padding:5px 9px;border:1px solid var(--border);border-radius:14px;background:var(--bg-elevated-2);color:var(--text-primary);cursor:pointer;}
+  .tp-review-actions button.active{background:var(--accent);color:#fff;border-color:var(--accent);}
   .tp-photo-empty{grid-column:1/-1;padding:20px 0;text-align:center;font-size:12px;color:var(--text-muted);}
   .tp-photo-item{position:relative;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border-soft);aspect-ratio:1;}
   .tp-photo-item img{width:100%;height:100%;object-fit:cover;cursor:pointer;display:block;}
@@ -442,6 +446,9 @@
     color:rgba(255,255,255,.85);border:1px solid rgba(255,255,255,.18);
   }
   .lb-defect-chip b{color:#fff;}
+  .lb-defect-resolution{font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:4px;}
+  .lb-defect-resolution.open{background:rgba(224,165,58,.22);color:#e0c15a;}
+  .lb-defect-resolution.closed{background:rgba(63,157,110,.22);color:#7fd9a8;}
 
   /* In-app toast/confirm — replaces the browser's native alert()/confirm() dialogs so messages
      read as coming from the app itself, not a browser-chrome dialog. */
@@ -455,6 +462,7 @@
     animation:app-toast-in .18s ease;
   }
   .app-toast.error{background:#7a2323;}
+  .app-toast.success{background:#1f6b45;}
   .app-toast.info{background:#1f6b45;}
   .app-toast-close{cursor:pointer;opacity:.7;font-weight:700;flex-shrink:0;}
   .app-toast-close:hover{opacity:1;}
@@ -463,11 +471,15 @@
   .app-confirm-overlay{position:fixed;inset:0;background:rgba(6,8,12,.6);z-index:5100;display:flex;align-items:center;justify-content:center;}
   .app-confirm-box{background:#fff;border-radius:14px;padding:22px 24px;max-width:340px;box-shadow:0 20px 50px rgba(0,0,0,.4);}
   .app-confirm-msg{font-size:14px;color:var(--text-primary);margin-bottom:18px;line-height:1.4;}
+  .app-comment-textarea{width:100%;padding:10px 12px;margin-bottom:16px;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;resize:vertical;outline:none;}
+  .app-comment-textarea:focus{border-color:var(--accent);}
+  .app-comment-textarea.error{border-color:var(--danger);}
   .app-confirm-actions{display:flex;gap:10px;justify-content:flex-end;}
 </style>
 {% endblock %}
 
 {% block body %}
+{% from "_breadcrumb.html" import breadcrumb %}
 <div class="pm-page">
   <nav class="navbar">
     <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
@@ -478,10 +490,18 @@
       {% endif %}
       {% if session.role != 'SME' %}
       <a href="{{ url_for('projects_bp.project_overview', project_id=project.id) }}" class="btn-ghost" title="Divisions, lines, towers, and defects at a glance">📊 Overview</a>
+      <a href="{{ url_for('projects_bp.project_divisions', project_id=project.id) }}" class="btn-logout" title="Back to the division cards for this project">← Back to Divisions</a>
+      {% else %}
+      <a href="/sme" class="btn-logout">← My Work</a>
       {% endif %}
-      <a href="{{ '/sme' if session.role == 'SME' else url_for(back_endpoint) }}" class="btn-logout">← {{ 'My Work' if session.role == 'SME' else 'Projects' }}</a>
     </div>
   </nav>
+  {{ breadcrumb([
+    {'label': project.module, 'url': url_for(back_endpoint)},
+    {'label': project.name, 'url': url_for('projects_bp.project_overview', project_id=project.id)},
+    {'label': selected_division.name, 'url': url_for('projects_bp.project_divisions', project_id=project.id)},
+    {'label': 'Map', 'url': none}
+  ]) }}
   <div class="pm-infobar">
     <div class="pm-stat"><div class="pm-sl">Project</div><div class="pm-sv">{{ project.name }}</div></div>
     {% if project.client_name %}
@@ -489,7 +509,7 @@
     {% endif %}
     <div class="pm-stat"><div class="pm-sl">Location</div><div class="pm-sv b">{{ project.state or '—' }}{% if project.country %}, {{ project.country }}{% endif %}</div></div>
     <div class="pm-stat"><div class="pm-sl">Owner</div><div class="pm-sv">{{ project.email or '—' }}</div></div>
-    <div class="pm-stat"><div class="pm-sl">Divisions</div><div class="pm-sv" id="pm-division-count">0</div>{% if project.planned_divisions %}<div class="pm-sl" style="margin-top:2px;">of {{ project.planned_divisions }} planned</div>{% endif %}</div>
+    <div class="pm-stat"><div class="pm-sl">Division</div><div class="pm-sv" id="pm-division-count">{{ selected_division.name }}</div></div>
     <div class="pm-stat"><div class="pm-sl">Visible Lines</div><div class="pm-sv g" id="pm-line-count">0</div></div>
     {% if project.timeline %}
     <div class="pm-stat"><div class="pm-sl">Timeline</div><div class="pm-sv">{{ project.timeline }}</div></div>
@@ -499,9 +519,9 @@
   <div class="map-page-wrap">
     <div class="division-sidebar">
       <div class="ds-header">
-        <div class="ds-title">Divisions</div>
-        {% if session.role != 'SME' %}
-        <button class="ds-add-btn" onclick="openAddDivisionModal()">+ Division</button>
+        <div class="ds-title">{{ selected_division.name }} · Lines</div>
+        {% if is_admin %}
+        <button class="ds-add-btn" onclick="openAddLineModal({{ selected_division.id }})">+ Add Line</button>
         {% endif %}
       </div>
       <div class="ds-list" id="division-list"><div class="ds-empty">Loading…</div></div>
@@ -529,6 +549,10 @@
               <button class="tower-panel-close" onclick="closeTowerListSidebar()" title="Close">✕</button>
             </div>
             <input id="pm-tower-search-input" class="pm-tower-sidebar-search" placeholder="Find tower…" oninput="filterTowerSidebarList(this.value)" onkeydown="if(event.key==='Enter') goToFirstMatchingTower();"/>
+            <select id="pm-tower-status-filter" class="pm-tower-sidebar-search" onchange="filterTowerSidebarList()" aria-label="Filter towers by status">
+              <option value="all">All Towers</option><option value="pending">Inspection Not Done</option><option value="done">Inspection Done</option><option value="open">Open Defects</option><option value="critical">Critical Defects</option>
+            </select>
+            <div style="display:flex;gap:8px;margin-top:8px"><button class="ctrl-btn" style="flex:1" onclick="goToAdjacentTower(-1)">← Previous</button><button class="ctrl-btn" style="flex:1" onclick="goToAdjacentTower(1)">Next →</button></div>
           </div>
           <div class="pm-tower-sidebar-body" id="pm-tower-sidebar-body"></div>
         </div>
@@ -602,6 +626,7 @@
       <div class="lightbox-zoom-controls" id="lightbox-zoom-controls">
         <button class="lb-zoom-btn" onclick="zoomImage(1)" title="Zoom in">+</button>
         <button class="lb-zoom-btn" onclick="zoomImage(-1)" title="Zoom out">−</button>
+        <button class="lb-zoom-btn" onclick="openOriginalImage()" title="Open the full original file in a new tab (true uploaded quality)" style="font-size:15px;">⤢</button>
       </div>
 
       {% if can_inspect %}
@@ -688,20 +713,24 @@
         <button type="button" class="ldp-close" onclick="cancelDefectForm()" title="Close">✕</button>
       </div>
       <div class="ldp-body">
-        <div class="field"><label>Component Name</label><input id="df-component" placeholder="e.g. Cross Arm"/></div>
+        <div class="field"><label>Component Name</label><input id="df-component" list="inspection-components" placeholder="e.g. Cross Arm" onchange="applyTaxonomyDefectOptions()"/><datalist id="inspection-components"></datalist></div>
         <div class="field">
           <label>Location</label>
           <select id="df-location">
             <option value="Top">Top</option>
             <option value="Middle">Middle</option>
             <option value="Bottom">Bottom</option>
+            <option value="Left">Left</option>
+            <option value="Right">Right</option>
           </select>
         </div>
         <div class="field">
           <label>Defect Type</label>
-          <select id="df-defect-type">
+          <select id="df-defect-type" onchange="updateDefectStatusOptions()">
             <option value="">— Select —</option>
+            <option>Abnormal Sound</option>
             <option>Anti Climbing Device</option>
+            <option>Any Other Defects</option>
             <option>Arcing Horn</option>
             <option>Back Filling</option>
             <option>Bird Excreta on Insulator</option>
@@ -711,8 +740,46 @@
             <option>Conductor Clearance Issue</option>
             <option>Conductor Condition</option>
             <option>Conductor Hardware Condition</option>
+            <option>Conductor Spacer</option>
             <option>Conductor VD</option>
             <option>Corona Ring</option>
+            <option>Cotter Bolt Split Pin</option>
+            <option>D Shackle Nut Bolt</option>
+            <option>Danger Board</option>
+            <option>Deposit on Insulator</option>
+            <option>Earth Bond</option>
+            <option>Earth Wire Clamp Nut Bolt</option>
+            <option>Earth Wire Hardware Condition</option>
+            <option>Earth Wire Tension Plate</option>
+            <option>Earth Wire VD</option>
+            <option>Earth Wire/OPGW Condition</option>
+            <option>Earthing Wire Connected with Stub</option>
+            <option>Encroachments in Row of Line</option>
+            <option>Hanger Cleat Nut Bolt Condition</option>
+            <option>Hot Point Observed</option>
+            <option>Insulator String Condition</option>
+            <option>Jumper Cone</option>
+            <option>LT/HT Line Crossing Clearance</option>
+            <option>LT/HT/EHV/ Telephonic Line Crossing</option>
+            <option>M Pin Placement</option>
+            <option>Mid Span Joint Repair Sleeve</option>
+            <option>Monkey Guard/ Bird guard</option>
+            <option>Number Plate</option>
+            <option>OPGW Joint Box</option>
+            <option>Phase Plate</option>
+            <option>Soil Removal from Stub</option>
+            <option>Status of Insulator Glazing</option>
+            <option>Stub Condition</option>
+            <option>Stub Painting</option>
+            <option>Submerge</option>
+            <option>Suspension Clamp Nut Bolt</option>
+            <option>Tower Nut & Bolt Status</option>
+            <option>Tower Painting Condition</option>
+            <option>Tower Parts Missing</option>
+            <option>Tower Step Bolt</option>
+            <option>Tower Vegetation Removal</option>
+            <option>Tower Welding Condition</option>
+            <option>Tree Cutting Spanwise</option>
           </select>
         </div>
         <div class="field">
@@ -720,6 +787,19 @@
           <select id="df-status">
             <option value="OK">OK</option>
             <option value="Missing">Missing</option>
+            <option value="Damaged">Damaged</option>
+            <option value="Loose">Loose</option>
+            <option value="Broken">Broken</option>
+            <option value="Cracked">Cracked</option>
+            <option value="Corroded">Corroded</option>
+            <option value="Bent">Bent</option>
+            <option value="Displaced">Displaced</option>
+            <option value="Deformed">Deformed</option>
+            <option value="Burnt">Burnt</option>
+            <option value="Contaminated">Contaminated</option>
+            <option value="Not Connected">Not Connected</option>
+            <option value="Needs Attention">Needs Attention</option>
+            <option value="Not Applicable">Not Applicable</option>
           </select>
         </div>
         <div class="field">
@@ -922,12 +1002,13 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://unpkg.com/@mapbox/togeojson@0.16.0/togeojson.js"></script>
+<script src="{{ url_for('static', filename='vendor/togeojson/togeojson.js') }}"></script>
 <script src="https://unpkg.com/exif-js@2.3.0/exif.js"></script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
-<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.css') }}"/>
+<script src="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.js') }}"></script>
 <script>
 const PROJECT_ID = {{ project.id }};
+const SELECTED_DIVISION_ID = {{ selected_division.id }};
 const IS_ADMIN = {{ is_admin|tojson }};
 const PROJECT_INSPECTION_TYPES = {{ project.get_inspection_types()|tojson }};
 const CAN_INSPECT = {{ can_inspect|tojson }};
@@ -952,8 +1033,48 @@ function isLineShowingPhotoDots(key) {
 
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
-  loadDivisions().then(handleDeepLinkedLine);
+  loadInspectionTaxonomyOptions();
+  loadDivisions().then(handleDeepLinkedLine).then(handleDeepLinkedDivision);
 });
+
+// Arriving from the Divisions cards page (?division=<id>) opens that
+// division straight away and centres the map on it, so the user lands
+// ready to add lines. A ?line= deep-link takes priority (handled above),
+// so we skip this when one is present.
+async function handleDeepLinkedDivision() {
+  const params = new URLSearchParams(window.location.search);
+  const divisionId = params.get('division');
+  if (!divisionId || params.get('line')) return;
+  if (!DIVISIONS[divisionId]) return;
+
+  // The user arrived through this division's card to work on its lines,
+  // not to browse the whole project — so scope the sidebar to just this
+  // division, retitle it, and turn the top "+ Division" action into
+  // "+ Add Line" for this division. (Divisions are created back on the
+  // divisions cards page now, not here.) "← Divisions" in the top bar
+  // takes them back to switch divisions.
+  Object.keys(DIVISIONS).forEach(id => { if (String(id) !== String(divisionId)) delete DIVISIONS[id]; });
+  renderDivisionList();
+  const item = document.getElementById(`division-item-${divisionId}`);
+  if (item) item.classList.add('open');
+  await loadLinesForDivision(divisionId);
+
+  const d = DIVISIONS[divisionId];
+  const title = document.querySelector('.ds-title');
+  if (title) title.textContent = d.name;
+  const addBtn = document.querySelector('.ds-add-btn');
+  if (addBtn) {
+    if (IS_ADMIN) {
+      addBtn.textContent = '+ Add Line';
+      addBtn.onclick = () => openAddLineModal(divisionId);
+    } else {
+      addBtn.style.display = 'none';
+    }
+  }
+  if (pmMap && typeof d.latitude === 'number' && typeof d.longitude === 'number') {
+    pmMap.setView([d.latitude, d.longitude], 12);
+  }
+}
 
 // Supports being linked straight into a specific line — e.g. "Start Work"
 // on the SME dashboard's assigned-line cards (?line=<id>, optionally
@@ -1000,10 +1121,15 @@ async function handleDeepLinkedLine() {
 
 function initMap() {
   pmMap = L.map('pm-map').setView([22.9, 86.5], 7);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
-    maxZoom: 19
-  }).addTo(pmMap);
+  window.addDrogoBaseLayer(pmMap);
+  const saved = sessionStorage.getItem(`drogo-map-state:${PROJECT_ID}:${SELECTED_DIVISION_ID}`);
+  if (saved) {
+    try { const state = JSON.parse(saved); if (state.lat != null && state.lng != null && state.zoom != null) pmMap.setView([state.lat, state.lng], state.zoom); } catch (e) { /* ignore stale state */ }
+  }
+  pmMap.on('moveend', () => {
+    const center = pmMap.getCenter();
+    sessionStorage.setItem(`drogo-map-state:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, JSON.stringify({lat:center.lat, lng:center.lng, zoom:pmMap.getZoom(), tower:currentTowerLabel || ''}));
+  });
 }
 
 async function loadDivisions() {
@@ -1012,8 +1138,9 @@ async function loadDivisions() {
     const res = await fetch(`/api/projects/${PROJECT_ID}/divisions`);
     const data = await res.json();
     DIVISIONS = {};
-    (data.divisions || []).forEach(d => DIVISIONS[d.id] = { ...d, lines: null });
-    document.getElementById('pm-division-count').textContent = (data.divisions || []).length;
+    const selected = (data.divisions || []).find(d => String(d.id) === String(SELECTED_DIVISION_ID));
+    if (selected) DIVISIONS[selected.id] = { ...selected, lines: null };
+    document.getElementById('pm-division-count').textContent = selected ? selected.name : 'Unavailable';
     renderDivisionList();
   } catch (e) {
     list.innerHTML = `<div class="ds-empty">Could not load divisions.</div>`;
@@ -1046,7 +1173,6 @@ function renderDivisionList() {
       <div class="division-body" id="division-body-${id}">
         <div class="division-coords">${d.latitude.toFixed(4)}, ${d.longitude.toFixed(4)}</div>
         <div id="lines-${id}"><div class="ds-empty" style="padding:10px 0;">Loading lines…</div></div>
-        ${IS_ADMIN ? `<button class="add-line-btn" onclick="openAddLineModal(${id})">+ Add Line</button>` : ''}
       </div>`;
     list.appendChild(item);
   });
@@ -1152,8 +1278,8 @@ function toggleLine(divisionId, line, key) {
 function renderLineOnMap(divisionId, line, key, refit = true) {
   const division = DIVISIONS[divisionId];
   const group = L.layerGroup();
-  const isKml = line.kml_url && /\.kml$/i.test(line.kml_url);
-  const isKmz = line.kml_url && /\.kmz$/i.test(line.kml_url);
+  const isKml = line.kml_url && /\.(kml|kmz)$/i.test(line.kml_url);
+  const isKmz = false; // KMZ is converted by the server-side GeoJSON cache.
 
   if (isKmz) {
     // .kmz is a zipped KML — this app can't unzip it in the browser, so it
@@ -1202,25 +1328,18 @@ function renderLineOnMap(divisionId, line, key, refit = true) {
 const KML_CACHE = {};   // line.id -> Promise<{ geojson, lengthKm, bounds }>
 
 function loadKmlForLine(line) {
-  if (!line.kml_url || !/\.kml$/i.test(line.kml_url)) return Promise.resolve(null);
+  if (!line.kml_url || !/\.(kml|kmz)$/i.test(line.kml_url)) return Promise.resolve(null);
   if (KML_CACHE[line.id]) return KML_CACHE[line.id];
 
-  KML_CACHE[line.id] = fetch(line.kml_url)
+  const preparedUrl = line.geojson_url || `/api/lines/${line.id}/geojson`;
+  KML_CACHE[line.id] = fetch(preparedUrl)
     .then(r => {
-      if (!r.ok) throw new Error(`KML fetch failed: ${r.status} ${r.statusText} (${line.kml_url})`);
-      return r.text();
+      if (!r.ok) throw new Error(`Prepared map fetch failed: ${r.status} ${r.statusText}`);
+      return r.json();
     })
-    .then(text => {
-      if (typeof toGeoJSON === 'undefined') {
-        throw new Error('togeojson library failed to load (check network/CDN access to unpkg.com).');
-      }
-      const xml = new DOMParser().parseFromString(text, 'text/xml');
-      const parseError = xml.querySelector('parsererror');
-      if (parseError) throw new Error(`KML XML could not be parsed: ${parseError.textContent.slice(0, 200)}`);
-
-      const geojson = toGeoJSON.kml(xml);
+    .then(geojson => {
       if (!geojson || !geojson.features || !geojson.features.length) {
-        throw new Error('KML parsed but contained no usable features (no LineString/Point geometry found).');
+        throw new Error('Prepared map contains no usable LineString/Point geometry.');
       }
 
       let lengthKm = 0;
@@ -1455,9 +1574,7 @@ async function openKmlEditModal(line) {
   if (kmlEditMap) { kmlEditMap.remove(); kmlEditMap = null; }
   kmlEditMap = L.map('kml-edit-map', { zoomControl: false });
   L.control.zoom({ position: 'bottomleft' }).addTo(kmlEditMap); // out of the way of the Draw toolbar (topright)
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors', maxZoom: 19,
-  }).addTo(kmlEditMap);
+  window.addDrogoBaseLayer(kmlEditMap);
 
   kmlEditFeatureGroup = new L.FeatureGroup();
   kmlEditMap.addLayer(kmlEditFeatureGroup);
@@ -1772,6 +1889,7 @@ function openTowerPanel(label, props, line, division, lat, lng) {
     currentTowerLabel = label;
     currentTowerLat = lat;
     currentTowerLng = lng;
+    sessionStorage.setItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, label);
 
     const titleEl = document.getElementById('tp-title');
     const rowsEl = document.getElementById('tp-details-rows');
@@ -1899,7 +2017,7 @@ function renderInspectionLabel(data) {
     label.textContent = `Done · ${data.marked_by || 'Admin'}`;
     label.className = 'tp-inspection-label done';
   } else {
-    label.textContent = 'Not reviewed yet';
+    label.textContent = 'Inspection not completed';
     label.className = 'tp-inspection-label pending';
   }
 }
@@ -1908,13 +2026,20 @@ async function toggleInspectionDone() {
   const checkbox = document.getElementById('tp-inspection-checkbox');
   if (!checkbox || !currentTowerLine || !currentTowerLabel) return;
   const wantDone = checkbox.checked;
+  if (wantDone && !IS_ADMIN) {
+    const confirmed = await showConfirm(
+      `Mark Tower ${currentTowerLabel} as Inspection Done? RGB defects and thermal measurements will become visible to the Client immediately.`,
+      'Mark Inspection Done'
+    );
+    if (!confirmed) { checkbox.checked = false; return; }
+  }
   checkbox.disabled = true;
+  const saveStatus = async () => fetch(`/api/lines/${currentTowerLine.id}/towers/${encodeURIComponent(currentTowerLabel)}/inspection-status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inspection_done: wantDone }),
+  });
   try {
-    const res = await fetch(`/api/lines/${currentTowerLine.id}/towers/${encodeURIComponent(currentTowerLabel)}/inspection-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inspection_done: wantDone }),
-    });
+    const res = await saveStatus();
     const data = await res.json();
     if (!res.ok) {
       checkbox.checked = !wantDone; // revert on failure
@@ -1939,6 +2064,103 @@ async function toggleInspectionDone() {
 // image through the same endpoint the old single-photo flow used.
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'tif', 'tiff'];
+
+// One complete line can be many gigabytes, but each file is intentionally
+// transferred as its own request. This state lets Admin cancel the queue
+// without losing files that already finished.
+let activeBulkUpload = null;
+
+async function createUploadBatch(lineId, files) {
+  const firstPath = files[0] && files[0].webkitRelativePath;
+  const folderName = firstPath ? firstPath.split('/')[0] : 'Selected folder';
+  const res = await fetch(`/api/lines/${lineId}/upload-batches`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_name: folderName, total_files: files.length})
+  });
+  if (!res.ok) throw new Error('Could not start upload monitoring.');
+  return res.json();
+}
+
+async function syncUploadBatch(status, final = false) {
+  if (!activeBulkUpload || !activeBulkUpload.batchId) return;
+  const items = activeBulkUpload.unsynced.splice(0);
+  try {
+    await fetch(`/api/upload-batches/${activeBulkUpload.batchId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status, items})
+    });
+  } catch (e) {
+    activeBulkUpload.unsynced.unshift(...items);
+    if (final) showToast('Upload finished, but its monitoring history could not be fully saved.');
+  }
+}
+
+function recordUploadOutcome(file, status, error = '', towerLabel = '', attempts = 0) {
+  if (!activeBulkUpload) return;
+  activeBulkUpload.unsynced.push({filename:file.name, file_size:file.size || 0,
+    status, error, tower_label:towerLabel, attempts});
+}
+
+async function showUploadHistory(lineId) {
+  const box = document.getElementById('tw-upload-history');
+  box.innerHTML = '<div class="tw-folder-progress">Loading upload history…</div>';
+  const res = await fetch(`/api/lines/${lineId}/upload-batches`);
+  const data = await res.json();
+  const towers = (data.tower_counts || []).map(t => `${escapeHtml(t.tower_label)}: ${t.images}`).join(' &nbsp;•&nbsp; ') || 'No tower images yet';
+  const rows = (data.batches || []).map(b => `<tr>
+    <td>${escapeHtml(b.started_at)}</td><td>${escapeHtml(b.folder_name || 'Selected folder')}</td>
+    <td><b>${escapeHtml(b.status)}</b></td><td>${b.completed_files}</td><td>${b.duplicate_files}</td>
+    <td>${b.failed_files + b.no_gps_files + b.unmatched_files}</td>
+    <td><a href="/api/upload-batches/${b.id}/errors.csv">Error CSV</a></td></tr>`).join('');
+  box.innerHTML = `<div class="tw-folder-summary"><b>Tower-wise image counts</b><br>${towers}</div>
+    <div style="overflow:auto;margin-top:8px"><table style="width:100%;font-size:10.5px;border-collapse:collapse">
+    <thead><tr><th>Date</th><th>Folder</th><th>Status</th><th>Uploaded</th><th>Duplicate</th><th>Problems</th><th>Report</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7">No bulk uploads recorded yet.</td></tr>'}</tbody></table></div>`;
+}
+
+function cancelBulkUpload() {
+  if (!activeBulkUpload) return;
+  activeBulkUpload.cancelled = true;
+  if (activeBulkUpload.controller) activeBulkUpload.controller.abort();
+}
+
+function uploadTimeoutMs(file) {
+  // Two minutes minimum plus one second per MiB, capped at fifteen minutes.
+  // This avoids the old fixed 45-second failure on large originals.
+  const mib = Math.max(1, (file && file.size ? file.size : 0) / (1024 * 1024));
+  return Math.min(15 * 60 * 1000, Math.max(2 * 60 * 1000, (120 + mib) * 1000));
+}
+
+async function uploadWithRetry(url, formDataFactory, file, attempts = 3) {
+  let lastError = 'Upload failed.';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (activeBulkUpload && activeBulkUpload.cancelled) return { ok: false, cancelled: true, error: 'Upload cancelled.' };
+    const controller = new AbortController();
+    if (activeBulkUpload) activeBulkUpload.controller = controller;
+    const timeoutId = setTimeout(() => controller.abort(), uploadTimeoutMs(file));
+    try {
+      const res = await fetch(url, { method: 'POST', body: formDataFactory(), signal: controller.signal });
+      clearTimeout(timeoutId);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true, photo: data, attempts: attempt };
+      // A previous attempt may have reached the server successfully even if
+      // its response was lost. The content hash proves the file is already
+      // present, so count that retry result as completed rather than failed.
+      if (res.status === 400 && /already uploaded|duplicate/i.test(data.error || '')) {
+        return { ok: true, duplicate: true, attempts: attempt };
+      }
+      // Validation/permission errors will not improve with retrying.
+      if (res.status >= 400 && res.status < 500) return { ok: false, error: data.error || `Upload rejected (${res.status}).` };
+      lastError = data.error || `Server error (${res.status}).`;
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (activeBulkUpload && activeBulkUpload.cancelled) return { ok: false, cancelled: true, error: 'Upload cancelled.' };
+      lastError = e.name === 'AbortError' ? 'Upload timed out.' : 'Network error.';
+    }
+    if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
+  }
+  return { ok: false, error: `${lastError} Retried ${attempts} times.` };
+}
 
 function isImageFile(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase();
@@ -2000,20 +2222,81 @@ function readImageGps(file) {
 
 const TOWER_MATCH_BUFFER_M = 70;
 
+async function inspectLocalUploadFile(file) {
+  const stem = file.name.replace(/\.[^.]+$/, '');
+  const mediaType = /_T(_\S+)?$/i.test(stem) ? 'thermal' : 'rgb';
+  if (!PROJECT_INSPECTION_TYPES.includes(mediaType)) {
+    return {valid:false, status:'Wrong Type', mediaType, error:`${mediaType.toUpperCase()} is not enabled for this project.`};
+  }
+  try {
+    let width = 0, height = 0;
+    if (window.createImageBitmap) {
+      const bitmap = await createImageBitmap(file);
+      width = bitmap.width; height = bitmap.height; bitmap.close();
+    }
+    const warnings = [];
+    if (width && height && (width < 640 || height < 480)) warnings.push(`Low resolution ${width}×${height}`);
+    if (mediaType === 'thermal') warnings.push('Radiometric data is confirmed when temperature measurement is used');
+    return {valid:true, status:warnings.length ? 'Warning' : 'Ready', mediaType, width, height, warnings};
+  } catch (e) {
+    return {valid:false, status:'Invalid', mediaType, error:'Browser could not decode this image.'};
+  }
+}
+
 async function handleFolderSelected(inputEl, lineId) {
   const allFiles = Array.from(inputEl.files || [])
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   inputEl.value = '';
   if (!allFiles.length || !currentDetailsLine) return;
 
+  activeBulkUpload = { cancelled: false, controller: null, batchId: null, unsynced: [] };
+
   const progressBox = document.getElementById('tw-folder-progress');
   progressBox.innerHTML = `<div class="tw-folder-progress">Reading folder…</div>`;
 
   // Videos and any non-image file are simply left out — not an error,
   // just not something this flow touches.
-  const imageFiles = allFiles.filter(f => isImageFile(f.name));
-  if (!imageFiles.length) {
+  const candidateImageFiles = allFiles.filter(f => isImageFile(f.name));
+  if (!candidateImageFiles.length) {
     progressBox.innerHTML = `<div class="tw-folder-progress">No images found in that folder (only image files are used — videos and other files are skipped).</div>`;
+    return;
+  }
+  const imageFiles = [];
+  let validationWarnings = 0, validationInvalid = 0;
+  for (let i = 0; i < candidateImageFiles.length; i++) {
+    progressBox.innerHTML = `<div class="tw-folder-progress">Validating image quality… ${i + 1}/${candidateImageFiles.length}</div>`;
+    const file = candidateImageFiles[i];
+    const check = await inspectLocalUploadFile(file);
+    if (!check.valid) {
+      validationInvalid++;
+      recordUploadOutcome(file, check.status, check.error || 'Image validation failed.');
+    } else {
+      if (check.warnings.length) validationWarnings++;
+      file._drogoValidation = check;
+      imageFiles.push(file);
+    }
+  }
+  if (!imageFiles.length) {
+    progressBox.innerHTML = `<div class="tw-folder-progress">All ${candidateImageFiles.length} image(s) failed validation. Nothing was uploaded.</div>`;
+    activeBulkUpload = null;
+    return;
+  }
+  const proceed = await showConfirm(
+    `${candidateImageFiles.length} images checked: ${imageFiles.length} ready, ${validationWarnings} with warnings, ${validationInvalid} rejected. Continue with GPS/tower matching and upload?`,
+    'Continue Upload'
+  );
+  if (!proceed) {
+    progressBox.innerHTML = '<div class="tw-folder-progress">Upload cancelled before any files were stored.</div>';
+    activeBulkUpload = null;
+    return;
+  }
+  try {
+    const batch = await createUploadBatch(lineId, candidateImageFiles);
+    activeBulkUpload.batchId = batch.id;
+    await syncUploadBatch('Preparing');
+  } catch (e) {
+    progressBox.innerHTML = `<div class="tw-folder-progress">${escapeHtml(e.message)}</div>`;
+    activeBulkUpload = null;
     return;
   }
 
@@ -2046,14 +2329,18 @@ async function handleFolderSelected(inputEl, lineId) {
     progressBox.innerHTML = `<div class="tw-folder-progress">Reading photo GPS… ${i + 1}/${imageFiles.length}</div>`;
     const file = imageFiles[i];
     const gps = await readImageGps(file);
-    if (!gps || !Number.isFinite(gps.lat) || !Number.isFinite(gps.lng)) { noGps++; continue; }
+    if (!gps || !Number.isFinite(gps.lat) || !Number.isFinite(gps.lng)) {
+      noGps++; recordUploadOutcome(file, 'No GPS', 'No readable GPS metadata.'); continue;
+    }
 
     let nearest = null, nearestDist = Infinity;
     for (const tp of towerPoints) {
       const dist = L.latLng(gps.lat, gps.lng).distanceTo(L.latLng(tp.lat, tp.lng));
       if (dist < nearestDist) { nearestDist = dist; nearest = tp; }
     }
-    if (!nearest || nearestDist > TOWER_MATCH_BUFFER_M) { tooFar++; continue; }
+    if (!nearest || nearestDist > TOWER_MATCH_BUFFER_M) {
+      tooFar++; recordUploadOutcome(file, 'Unmatched', `More than ${TOWER_MATCH_BUFFER_M}m from every KML tower.`); continue;
+    }
 
     matched.push({ file, label: nearest.label, lat: nearest.lat, lng: nearest.lng });
   }
@@ -2061,7 +2348,10 @@ async function handleFolderSelected(inputEl, lineId) {
   const matchedTowers = [...new Set(matched.map(m => m.label))];
   const matchedCount = matched.length;
   if (!matchedCount) {
+    await syncUploadBatch('Completed with errors', true);
     progressBox.innerHTML = `<div class="tw-folder-progress">No photos matched any tower within ${TOWER_MATCH_BUFFER_M}m. ${noGps} had no GPS data, ${tooFar} were too far from every tower point.</div>`;
+    activeBulkUpload = null;
+    showUploadHistory(lineId);
     return;
   }
 
@@ -2069,21 +2359,31 @@ async function handleFolderSelected(inputEl, lineId) {
   let uploaded = 0, failed = 0;
   let done = 0;
   const failReasons = {}; // error message -> [filenames]
+  await syncUploadBatch('Uploading');
   for (const item of matched) {
+    if (activeBulkUpload.cancelled) break;
     progressBox.innerHTML = `
       <div class="tw-folder-progress">Uploading… ${done + 1}/${matchedCount}
         <div class="tw-folder-progress-bar"><div class="tw-folder-progress-fill" style="width:${Math.round((done / matchedCount) * 100)}%;"></div></div>
+        <button type="button" onclick="cancelBulkUpload()" style="margin-top:7px;">Cancel upload</button>
       </div>`;
     const result = await uploadPhotoToTower(lineId, item.label, item.file, item.lat, item.lng);
     if (result.ok) {
       uploaded++;
+      recordUploadOutcome(item.file, result.duplicate ? 'Duplicate' : 'Completed', '', item.label, result.attempts || 1);
     } else {
       failed++;
       const reason = result.error || 'Unknown error';
       if (!failReasons[reason]) failReasons[reason] = [];
       failReasons[reason].push(item.file.name);
+      recordUploadOutcome(item.file, result.cancelled ? 'Cancelled' : 'Failed', reason, item.label, result.attempts || 0);
     }
     done++;
+    if (activeBulkUpload.unsynced.length >= 20) await syncUploadBatch('Uploading');
+  }
+
+  if (activeBulkUpload.cancelled) {
+    for (const item of matched.slice(done)) recordUploadOutcome(item.file, 'Cancelled', 'Upload cancelled before this file started.', item.label);
   }
 
   const failDetail = Object.entries(failReasons).map(([reason, files]) => {
@@ -2094,10 +2394,14 @@ async function handleFolderSelected(inputEl, lineId) {
   progressBox.innerHTML = `
     <div class="tw-folder-summary">
       <b>${uploaded} photo(s) uploaded</b> across ${matchedTowers.length} tower(s).<br/>
+      ${activeBulkUpload.cancelled ? `Upload cancelled after ${done}/${matchedCount} files. Already uploaded files were kept.<br/>` : ''}
       ${failed ? `${failed} upload(s) failed:<br/>${failDetail}` : ''}
       ${noGps ? `${noGps} image(s) had no GPS data and were skipped.<br/>` : ''}
       ${tooFar ? `${tooFar} image(s) were more than ${TOWER_MATCH_BUFFER_M}m from any tower and were skipped.` : ''}
     </div>`;
+  await syncUploadBatch(activeBulkUpload.cancelled ? 'Cancelled' : (failed || noGps || tooFar ? 'Completed with errors' : 'Completed'), true);
+  activeBulkUpload = null;
+  showUploadHistory(lineId);
 
   // Refresh whatever's currently visible so the new uploads show up
   // without needing a manual reload.
@@ -2115,6 +2419,8 @@ async function handleCorridorFolderSelected(inputEl, lineId) {
   inputEl.value = '';
   if (!allFiles.length) return;
 
+  activeBulkUpload = { cancelled: false, controller: null };
+
   const progressBox = document.getElementById('tw-corridor-progress');
   progressBox.innerHTML = `<div class="tw-folder-progress">Reading folder…</div>`;
 
@@ -2130,9 +2436,11 @@ async function handleCorridorFolderSelected(inputEl, lineId) {
   let uploaded = 0, failed = 0, noGps = 0, done = 0;
   const failReasons = {};
   for (const file of imageFiles) {
+    if (activeBulkUpload.cancelled) break;
     progressBox.innerHTML = `
       <div class="tw-folder-progress">Uploading… ${done + 1}/${imageFiles.length}
         <div class="tw-folder-progress-bar"><div class="tw-folder-progress-fill" style="width:${Math.round((done / imageFiles.length) * 100)}%;"></div></div>
+        <button type="button" onclick="cancelBulkUpload()" style="margin-top:7px;">Cancel upload</button>
       </div>`;
     const gps = await readImageGps(file);
     if (!gps || !Number.isFinite(gps.lat) || !Number.isFinite(gps.lng)) { noGps++; done++; continue; }
@@ -2154,30 +2462,24 @@ async function handleCorridorFolderSelected(inputEl, lineId) {
   progressBox.innerHTML = `
     <div class="tw-folder-summary">
       <b>${uploaded} corridor photo(s) uploaded.</b><br/>
+      ${activeBulkUpload.cancelled ? `Upload cancelled after ${done}/${imageFiles.length} files. Already uploaded files were kept.<br/>` : ''}
       ${failed ? `${failed} upload(s) failed:<br/>${failDetail}` : ''}
       ${noGps ? `${noGps} image(s) had no GPS data and were skipped.` : ''}
     </div>`;
+
+  activeBulkUpload = null;
 
   refreshPhotoDotsForCurrentLine();
 }
 
 async function uploadCorridorPhoto(lineId, file, lat, lng) {
-  const fd = new FormData();
-  fd.append('image', file);
-  fd.append('gps_lat', lat);
-  fd.append('gps_lng', lng);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45000);
-  try {
-    const res = await fetch(`/api/lines/${lineId}/corridor-photos`, { method: 'POST', body: fd, signal: controller.signal });
-    clearTimeout(timeoutId);
-    const data = await res.json();
-    if (!res.ok) return { ok: false, error: data.error || 'Upload failed.' };
-    return { ok: true, photo: data };
-  } catch (e) {
-    clearTimeout(timeoutId);
-    return { ok: false, error: e.name === 'AbortError' ? 'Upload timed out.' : 'Network error.' };
-  }
+  return uploadWithRetry(`/api/lines/${lineId}/corridor-photos`, () => {
+    const fd = new FormData();
+    fd.append('image', file);
+    fd.append('gps_lat', lat);
+    fd.append('gps_lng', lng);
+    return fd;
+  }, file);
 }
 
 let currentCorridorLineId = null;
@@ -2202,7 +2504,7 @@ async function loadCorridorPhotos() {
     }
     grid.innerHTML = currentCorridorPhotos.map(p => `
       <div class="tp-photo-item" onclick="openCorridorPhotoDetail(${p.id})">
-        <img src="${p.image_url}" loading="lazy"/>
+        <img src="${p.thumbnail_url || p.image_url}" loading="lazy" decoding="async"/>
         ${p.observation ? `<div class="tp-photo-defect-badge">${escapeHtml(p.observation.slice(0, 40))}${p.observation.length > 40 ? '…' : ''}</div>` : ''}
       </div>`).join('');
   } catch (e) {
@@ -2285,23 +2587,50 @@ function downloadTowerReport(reportId) {
   window.location.href = `/api/tower-reports/${reportId}/download`;
 }
 
+let towerPhotosAbortController = null;
+let towerPhotosRequestSerial = 0;
 async function loadTowerPhotos() {
   const grid = document.getElementById('tp-photo-grid');
   if (!currentTowerLine || !currentTowerLabel) return;
+  if (towerPhotosAbortController) towerPhotosAbortController.abort();
+  towerPhotosAbortController = new AbortController();
+  const requestSerial = ++towerPhotosRequestSerial;
+  const requestedLine = currentTowerLine.id;
+  const requestedTower = currentTowerLabel;
   grid.innerHTML = '<div class="tp-photo-empty">Loading…</div>';
   try {
     if (CAN_INSPECT) {
-      const res = await fetch(`/api/lines/${currentTowerLine.id}/tower-photos?tower=${encodeURIComponent(currentTowerLabel)}`);
+      const pageUrl = afterId => `/api/lines/${requestedLine}/tower-photos?tower=${encodeURIComponent(requestedTower)}&per_page=120${afterId ? `&after_id=${afterId}` : ''}`;
+      const res = await fetch(pageUrl(0), {signal:towerPhotosAbortController.signal});
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not load tower photos.');
+      if (requestSerial !== towerPhotosRequestSerial || requestedLine !== currentTowerLine.id || requestedTower !== currentTowerLabel) return;
       renderTowerPhotos(data.photos || []);
+      // Continue from the server cursor. Only 48 thumbnails are rendered at
+      // once, but every image remains available to filters and lightbox
+      // navigation even when a tower contains more than the old 500 cap.
+      let allPhotos = data.photos || [];
+      let hasMore = Boolean(data.has_more);
+      let afterId = data.next_after_id;
+      while (hasMore && afterId) {
+        const nextRes = await fetch(pageUrl(afterId), {signal:towerPhotosAbortController.signal});
+        const nextData = await nextRes.json();
+        if (!nextRes.ok) throw new Error(nextData.error || 'Could not load the next photo page.');
+        if (requestSerial !== towerPhotosRequestSerial || requestedLine !== currentTowerLine.id || requestedTower !== currentTowerLabel) return;
+        allPhotos = allPhotos.concat(nextData.photos || []);
+        currentTowerPhotos = allPhotos;
+        hasMore = Boolean(nextData.has_more);
+        afterId = nextData.next_after_id;
+      }
+      if (allPhotos.length !== (data.photos || []).length) renderTowerPhotos(allPhotos);
     } else {
       // Client only ever sees ANNOTATED photos — RGB with at least one
       // marked defect, thermal with at least one measured point. A clean/
       // unmarked photo of either kind is excluded, same rule for both
       // now: no defects list a photo → nothing to show a client there.
       const [defectsRes, thermalRes] = await Promise.all([
-        fetch(`/api/lines/${currentTowerLine.id}/tower-defects-flat?tower=${encodeURIComponent(currentTowerLabel)}`),
-        fetch(`/api/lines/${currentTowerLine.id}/tower-thermal-points-flat?tower=${encodeURIComponent(currentTowerLabel)}`),
+        fetch(`/api/lines/${requestedLine}/tower-defects-flat?tower=${encodeURIComponent(requestedTower)}`, {signal:towerPhotosAbortController.signal}),
+        fetch(`/api/lines/${requestedLine}/tower-thermal-points-flat?tower=${encodeURIComponent(requestedTower)}`, {signal:towerPhotosAbortController.signal}),
       ]);
       const defectsData = await defectsRes.json();
       const thermalData = await thermalRes.json();
@@ -2309,6 +2638,7 @@ async function loadTowerPhotos() {
       const entries = (defectsData.defects || []).map(d => ({
         id: d.tower_photo_id,
         image_url: d.image_url,
+        is_thermal: false,
         defect_count: 1,
         _focusDefectId: d.id,
         _focusSeverity: d.severity,
@@ -2323,12 +2653,13 @@ async function loadTowerPhotos() {
       (thermalData.points || []).forEach(pt => {
         if (seenThermalPhotos.has(pt.tower_photo_id)) return;
         seenThermalPhotos.add(pt.tower_photo_id);
-        entries.push({ id: pt.tower_photo_id, image_url: pt.image_url, defect_count: 0 });
+        entries.push({ id: pt.tower_photo_id, image_url: pt.image_url, is_thermal: true, defect_count: 0 });
       });
 
       renderTowerPhotos(entries);
     }
   } catch (e) {
+    if (e.name === 'AbortError') return;
     grid.innerHTML = '<div class="tp-photo-empty">Could not load photos.</div>';
   }
 }
@@ -2346,8 +2677,12 @@ let activePhotoTypeTab = PROJECT_INSPECTION_TYPES.includes('rgb') ? 'rgb' : 'the
 // filename-based, no separate database column — the marker survives
 // upload (secure_filename preserves the base name, and even the
 // collision-rename fallback keeps it: "DJI_0123_T_1.JPG" still matches).
-function isThermalPhoto(imageUrl) {
-  const filename = (imageUrl || '').split('/').pop() || '';
+function isThermalPhoto(photoOrUrl) {
+  if (photoOrUrl && typeof photoOrUrl === 'object' && typeof photoOrUrl.is_thermal === 'boolean') {
+    return photoOrUrl.is_thermal;
+  }
+  const imageUrl = typeof photoOrUrl === 'string' ? photoOrUrl : (photoOrUrl?.image_url || '');
+  const filename = imageUrl.split('/').pop() || '';
   const base = filename.replace(/\.[^.]+$/, '');
   return /_T(_\d+)?$/i.test(base);
 }
@@ -2361,12 +2696,32 @@ function setPhotoTypeTab(type) {
 }
 
 let currentFilteredPhotos = [];
+// Render the grid in chunks instead of dumping all of a tower's photos
+// into the DOM at once — a tower can hold hundreds of RGB/thermal photos,
+// and building that many nodes in one pass is what made opening a tower
+// lag. The full filtered array stays in currentFilteredPhotos so the
+// lightbox's prev/next still spans every photo, even ones not yet drawn.
+const PHOTO_WINDOW = 48;
+let photoRenderedCount = 0;
+
+function photoItemHtml(p, i) {
+  const badge = !CAN_INSPECT
+    ? (p._focusDefectId ? `<span class="tp-photo-defect-badge">${p._focusComponentName ? escapeHtml(p._focusComponentName) : '1 defect'}</span>` : '')
+    : (p.defect_count ? `<span class="tp-photo-defect-badge">${p.defect_count} defect${p.defect_count === 1 ? '' : 's'}</span>` : '');
+  return `
+    <div class="tp-photo-item">
+      <img src="${escapeHtml(p.thumbnail_url || p.image_url)}" alt="" loading="lazy" decoding="async" onclick="openPhotoLightbox(${i})"/>
+      ${badge}
+      ${IS_ADMIN ? `<button class="tp-photo-del" title="Delete" onclick="deleteTowerPhoto(${p.id})">✕</button>` : ''}
+    </div>`;
+}
 
 function renderTowerPhotos(photos, replaceStored = true) {
   if (replaceStored) currentTowerPhotos = photos;
   const grid = document.getElementById('tp-photo-grid');
-  const filtered = photos.filter(p => isThermalPhoto(p.image_url) === (activePhotoTypeTab === 'thermal'));
+  const filtered = photos.filter(p => isThermalPhoto(p) === (activePhotoTypeTab === 'thermal'));
   currentFilteredPhotos = filtered;
+  photoRenderedCount = 0;
   if (!filtered.length) {
     const kind = activePhotoTypeTab === 'thermal' ? 'thermal' : 'RGB';
     let emptyMsg = 'Pilot not captured yet.';
@@ -2377,27 +2732,36 @@ function renderTowerPhotos(photos, replaceStored = true) {
       : `<div class="tp-photo-empty">${emptyMsg}</div>`;
     return;
   }
-  grid.innerHTML = filtered.map((p, i) => {
-    // Client entries: only entries actually focused on a specific defect
-    // (_focusDefectId set — see loadTowerPhotos) get a badge; a clean
-    // photo or a thermal one (no RGB defects) now legitimately has none,
-    // where before every client entry always represented a real defect.
-    const badge = !CAN_INSPECT
-      ? (p._focusDefectId ? `<span class="tp-photo-defect-badge">${p._focusComponentName ? escapeHtml(p._focusComponentName) : '1 defect'}</span>` : '')
-      : (p.defect_count ? `<span class="tp-photo-defect-badge">${p.defect_count} defect${p.defect_count === 1 ? '' : 's'}</span>` : '');
-    return `
-    <div class="tp-photo-item">
-      <img src="${escapeHtml(p.image_url)}" alt="" onclick="openPhotoLightbox(${i})"/>
-      ${badge}
-      ${IS_ADMIN ? `<button class="tp-photo-del" title="Delete" onclick="deleteTowerPhoto(${p.id})">✕</button>` : ''}
-    </div>`;
-  }).join('');
+  grid.innerHTML = '';
+  appendPhotoWindow();
+}
+
+function appendPhotoWindow() {
+  const grid = document.getElementById('tp-photo-grid');
+  const oldWrap = document.getElementById('tp-photo-more-wrap');
+  if (oldWrap) oldWrap.remove();
+  const end = Math.min(photoRenderedCount + PHOTO_WINDOW, currentFilteredPhotos.length);
+  let html = '';
+  for (let i = photoRenderedCount; i < end; i++) html += photoItemHtml(currentFilteredPhotos[i], i);
+  grid.insertAdjacentHTML('beforeend', html);
+  photoRenderedCount = end;
+  if (photoRenderedCount < currentFilteredPhotos.length) {
+    const remaining = currentFilteredPhotos.length - photoRenderedCount;
+    const kind = activePhotoTypeTab === 'thermal' ? 'thermal' : 'RGB';
+    grid.insertAdjacentHTML('beforeend',
+      `<div id="tp-photo-more-wrap" style="grid-column:1/-1;padding:6px 0 2px;">
+         <button onclick="appendPhotoWindow()" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-elevated-2);color:var(--text-primary);font-weight:600;font-size:12.5px;cursor:pointer;">
+           Load ${Math.min(PHOTO_WINDOW, remaining)} more (${remaining} ${kind} remaining)
+         </button>
+       </div>`);
+  }
 }
 
 function openPhotoLightbox(index) {
   currentPhotoIndex = index;
   document.getElementById('photo-lightbox').classList.add('open');
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 function closePhotoLightbox() {
@@ -2412,6 +2776,12 @@ function closePhotoLightbox() {
 function renderLightboxImage() {
   const photo = currentFilteredPhotos[currentPhotoIndex];
   if (!photo) { closePhotoLightbox(); return; }
+  const lightboxImg = document.getElementById('lightbox-img');
+  lightboxImg.onerror = () => {
+    if (photo.thumbnail_url && lightboxImg.src !== new URL(photo.thumbnail_url, window.location.origin).href) {
+      lightboxImg.src = photo.thumbnail_url;
+    }
+  };
   document.getElementById('lightbox-img').src = photo.image_url;
   document.getElementById('lightbox-counter').textContent = `${currentPhotoIndex + 1} / ${currentFilteredPhotos.length}`;
   document.getElementById('lightbox-prev').style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
@@ -2423,7 +2793,7 @@ function renderLightboxImage() {
   resetLocalThermalMeasurements();
   currentFocusDefectId = photo._focusDefectId || null;
 
-  const isThermal = isThermalPhoto(photo.image_url);
+  const isThermal = isThermalPhoto(photo);
   const markBtn = document.getElementById('lb-mark-btn');
   const thermalToolbar = document.getElementById('lightbox-thermal-toolbar');
   const thermalShapeTools = document.getElementById('lightbox-thermal-shape-tools');
@@ -2479,23 +2849,60 @@ function renderLightboxImage() {
   }
 }
 
+function prefetchAdjacentPhotos() {
+  if (currentFilteredPhotos.length < 2) return;
+  const indexes = [(currentPhotoIndex + 1) % currentFilteredPhotos.length,
+                   (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length];
+  indexes.forEach(index => {
+    const url = currentFilteredPhotos[index]?.image_url;
+    if (url) { const image = new Image(); image.decoding = 'async'; image.src = url; }
+  });
+}
+
 function lightboxNext() {
   currentPhotoIndex = (currentPhotoIndex + 1) % currentFilteredPhotos.length;
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 function lightboxPrev() {
   currentPhotoIndex = (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length;
   renderLightboxImage();
+  prefetchAdjacentPhotos();
 }
 
 document.addEventListener('keydown', (e) => {
   const lb = document.getElementById('photo-lightbox');
   if (!lb || !lb.classList.contains('open')) return;
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
   if (e.key === 'Escape') closePhotoLightbox();
   if (e.key === 'ArrowRight') lightboxNext();
   if (e.key === 'ArrowLeft') lightboxPrev();
 });
+
+let inspectionTaxonomy = [];
+async function loadInspectionTaxonomyOptions() {
+  try {
+    const res = await fetch('/api/inspection-taxonomy/active');
+    const data = await res.json();
+    if (!res.ok) return;
+    inspectionTaxonomy = data.components || [];
+    const list = document.getElementById('inspection-components');
+    if (list) list.innerHTML = inspectionTaxonomy.map(row => `<option value="${escapeHtml(row.name)}"></option>`).join('');
+  } catch (e) { /* legacy free-text behaviour remains available */ }
+}
+
+function applyTaxonomyDefectOptions() {
+  if (!inspectionTaxonomy.length) return;
+  const componentName = document.getElementById('df-component').value.trim();
+  const component = inspectionTaxonomy.find(row => row.name.toLowerCase() === componentName.toLowerCase());
+  if (!component) return;
+  const select = document.getElementById('df-defect-type');
+  const previous = select.value;
+  select.innerHTML = '<option value="">— Select —</option>' + (component.defect_types || []).map(row => `<option value="${escapeHtml(row.name)}">${escapeHtml(row.name)}</option>`).join('');
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  updateDefectStatusOptions();
+}
 
 // ── Photo zoom — scoped ONLY to the image (lightbox-zoom-layer), never
 // the page. Wheel and pinch events on the image wrap are intercepted with
@@ -2522,6 +2929,16 @@ function zoomImage(dir) {
 function resetImgZoom() {
   imgZoom = 1; imgPanX = 0; imgPanY = 0;
   applyImgZoom();
+}
+
+// Opens the exact original file the server is serving, in a new tab, at
+// its true resolution — full-quality view / download, and a diagnostic:
+// if this raw tab is ALSO lower quality than your source file, the loss
+// is at the server/CDN (e.g. Cloudflare image optimisation), not the app.
+function openOriginalImage() {
+  const p = currentFilteredPhotos[currentPhotoIndex];
+  const url = p && p.image_url;
+  if (url) window.open(url, '_blank', 'noopener');
 }
 
 (function setupLightboxZoom() {
@@ -2682,23 +3099,102 @@ function renderDefectChips() {
   if (!list) return;
   const defects = visibleDefects();
   if (!defects.length) { list.innerHTML = ''; return; }
-  list.innerHTML = defects.map(d => `
+  list.innerHTML = defects.map(d => {
+    const resolution = d.resolution_status || 'Open';
+    const isClosed = resolution === 'Closed';
+    return `
     <span class="lb-defect-chip">
       <b>${escapeHtml(d.component_name || 'Defect')}</b>${d.location ? ' · ' + escapeHtml(d.location) : ''} · ${escapeHtml(d.severity)} · ${escapeHtml(d.status || 'OK')}
+      <span class="lb-defect-resolution ${isClosed ? 'closed' : 'open'}" title="${isClosed ? escapeHtml((d.resolved_by ? 'Closed by ' + d.resolved_by + '. ' : '') + (d.resolution_comment || '')) : ''}">${isClosed ? '✓ Closed' : 'Open'}</span>
+      ${(d.resolution_history || []).length ? ` <a href="javascript:void(0)" onclick="showDefectHistory(${d.id})" style="color:var(--accent);text-decoration:none;font-size:11px;font-weight:700;">History (${d.resolution_history.length})</a>` : ''}
       ${CAN_INSPECT ? ` <a href="javascript:void(0)" onclick="deleteTowerDefect(${d.id})" style="color:#f88;text-decoration:none;">✕</a>` : ''}
-    </span>`).join('');
+    </span>`;
+  }).join('');
+}
+
+async function toggleDefectResolution(id, action) {
+  const response = await promptForDefectAction(action);
+  if (!response) return;
+  try {
+    const fd = new FormData();
+    fd.append('action', action);
+    fd.append('comment', response.comment);
+    if (response.evidence) fd.append('evidence_image', response.evidence);
+    const res = await fetch(`/api/tower-defects/${id}/resolve`, {
+      method: 'POST',
+      body: fd,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || 'Could not update this defect.');
+      return;
+    }
+    const updated = await res.json();
+    const d = currentPhotoDefects.find(x => x.id === id);
+    if (d) {
+      d.resolution_status = updated.resolution_status;
+      d.resolved_by = updated.resolved_by;
+      d.resolved_at = updated.resolved_at;
+      d.resolution_comment = updated.resolution_comment;
+      d.resolution_history = updated.resolution_history || [];
+    }
+    renderDefectChips();
+  } catch (e) {
+    showToast('Could not update this defect.');
+  }
+}
+
+function showDefectHistory(id) {
+  const defect = currentPhotoDefects.find(item => item.id === id);
+  const rows = defect ? (defect.resolution_history || []) : [];
+  const overlay = document.createElement('div');
+  overlay.className = 'app-confirm-overlay';
+  overlay.innerHTML = `
+    <div class="app-confirm-box" style="max-width:520px;max-height:75vh;overflow-y:auto;">
+      <div class="app-confirm-msg">Defect status history</div>
+      ${rows.length ? rows.slice().reverse().map(event => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border-soft);font-size:12px;">
+          <div style="font-weight:800;color:var(--text-primary);">${escapeHtml(event.from_status)} → ${escapeHtml(event.to_status)}</div>
+          <div style="color:var(--text-secondary);margin-top:4px;">${escapeHtml(event.comment)}</div>
+          <div style="color:var(--text-muted);font-size:10.5px;margin-top:4px;">${escapeHtml(event.changed_by || 'User')} · ${escapeHtml(event.changed_by_role || '')} · ${escapeHtml(event.created_at || '')}</div>
+          ${event.evidence_image_url ? `<a href="${escapeHtml(event.evidence_image_url)}" target="_blank" rel="noopener" style="display:inline-block;margin-top:6px;color:var(--accent);">View rectification image</a>` : ''}
+        </div>`).join('') : '<div class="dash-empty">No history recorded.</div>'}
+      <div class="app-confirm-actions"><button type="button" class="btn-primary" id="defect-history-close">Close</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#defect-history-close').onclick = () => overlay.remove();
+  overlay.addEventListener('click', event => { if (event.target === overlay) overlay.remove(); });
 }
 
 async function deleteTowerDefect(id) {
-  if (!await showConfirm('Delete this defect marking?')) return;
+  const reason = await promptForAnnotationDeletion();
+  if (reason === null) return;
   try {
-    await fetch(`/api/tower-defects/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/tower-defects/${id}`, { method: 'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason}) });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Could not delete defect.'); return; }
     const photo = currentFilteredPhotos[currentPhotoIndex];
     if (photo) loadPhotoDefects(photo.id);
     loadTowerPhotos();
   } catch (e) {
     showToast('Could not delete defect.');
   }
+}
+
+function promptForAnnotationDeletion() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'app-confirm-overlay';
+    overlay.innerHTML = `<div class="app-confirm-box"><div class="app-confirm-msg">Delete this defect marking?</div>
+      <textarea class="app-comment-textarea" rows="3" placeholder="Reason (optional)"></textarea>
+      <div class="app-confirm-actions"><button class="btn-ghost" type="button">Cancel</button><button class="btn-primary" type="button">Delete Annotation</button></div></div>`;
+    document.body.appendChild(overlay);
+    const buttons = overlay.querySelectorAll('button');
+    const finish = value => { overlay.remove(); resolve(value); };
+    buttons[0].onclick = () => finish(null);
+    buttons[1].onclick = () => finish(overlay.querySelector('textarea').value.trim());
+    overlay.addEventListener('click', event => { if (event.target === overlay) finish(null); });
+  });
 }
 
 // ── Thermal temperature measurement (Point / Rectangle / Line) ──────────
@@ -3124,11 +3620,88 @@ function cancelDefectMarking() {
 }
 
 // ── Mark Defect form ──────────────────────────────────────────────────────
+
+// Different defect types get inspected against different real-world
+// vocabularies — a Number Plate is checked as present/missing/damaged,
+// while Tower Painting Condition is a quality call (Good/Fair/Poor), and
+// a clearance-style check like Conductor VD is a pass/fail against a
+// limit. One shared OK/Missing list doesn't fit all of these, so each
+// type gets whichever list actually matches what's being assessed.
+const DEFECT_STATUS_OPTIONS = {
+  'Abnormal Sound': ['No', 'Yes'],
+  'Anti Climbing Device': ['OK', 'Missing', 'Damaged'],
+  'Any Other Defects': ['OK', 'Issue Found'],
+  'Arcing Horn': ['OK', 'Missing', 'Damaged'],
+  'Back Filling': ['Not Required', 'Required', 'Done'],
+  'Bird Excreta on Insulator': ['No', 'Yes'],
+  'Bird Nest/Movement': ['No', 'Yes'],
+  'Chimney/Muffling Condition': ['Good', 'Fair', 'Poor'],
+  'Conductor Armour Rod': ['OK', 'Missing', 'Damaged'],
+  'Conductor Clearance Issue': ['Within Limit', 'Not Within Limit'],
+  'Conductor Condition': ['Good', 'Fair', 'Poor'],
+  'Conductor Hardware Condition': ['Good', 'Fair', 'Poor'],
+  'Conductor Spacer': ['OK', 'Missing', 'Damaged'],
+  'Conductor VD': ['Within Limit', 'Not Within Limit'],
+  'Corona Ring': ['OK', 'Missing', 'Damaged'],
+  'Cotter Bolt Split Pin': ['OK', 'Missing'],
+  'D Shackle Nut Bolt': ['OK', 'Missing', 'Loose'],
+  'Danger Board': ['OK', 'Missing', 'Damaged'],
+  'Deposit on Insulator': ['No', 'Yes'],
+  'Earth Bond': ['OK', 'Missing', 'Damaged'],
+  'Earth Wire Clamp Nut Bolt': ['OK', 'Missing', 'Loose'],
+  'Earth Wire Hardware Condition': ['Good', 'Fair', 'Poor'],
+  'Earth Wire Tension Plate': ['Within Limit', 'Not Within Limit'],
+  'Earth Wire VD': ['Within Limit', 'Not Within Limit'],
+  'Earth Wire/OPGW Condition': ['Good', 'Fair', 'Poor'],
+  'Earthing Wire Connected with Stub': ['Connected', 'Not Connected', 'Damaged'],
+  'Encroachments in Row of Line': ['No', 'Yes'],
+  'Hanger Cleat Nut Bolt Condition': ['OK', 'Missing', 'Loose'],
+  'Hot Point Observed': ['No', 'Yes'],
+  'Insulator String Condition': ['Good', 'Fair', 'Poor'],
+  'Jumper Cone': ['OK', 'Missing', 'Damaged'],
+  'LT/HT Line Crossing Clearance': ['Within Limit', 'Not Within Limit'],
+  'LT/HT/EHV/ Telephonic Line Crossing': ['No', 'Yes'],
+  'M Pin Placement': ['OK', 'Missing'],
+  'Mid Span Joint Repair Sleeve': ['OK', 'Missing', 'Damaged'],
+  'Monkey Guard/ Bird guard': ['OK', 'Missing', 'Damaged'],
+  'Number Plate': ['OK', 'Missing', 'Damaged'],
+  'OPGW Joint Box': ['OK', 'Missing', 'Damaged'],
+  'Phase Plate': ['OK', 'Missing', 'Damaged'],
+  'Soil Removal from Stub': ['Not Required', 'Required', 'Done'],
+  'Status of Insulator Glazing': ['Good', 'Fair', 'Poor'],
+  'Stub Condition': ['Good', 'Fair', 'Poor'],
+  'Stub Painting': ['Good', 'Fair', 'Poor'],
+  'Submerge': ['No', 'Yes'],
+  'Suspension Clamp Nut Bolt': ['OK', 'Missing', 'Loose'],
+  'Tower Nut & Bolt Status': ['OK', 'Missing', 'Loose'],
+  'Tower Painting Condition': ['Good', 'Fair', 'Poor'],
+  'Tower Parts Missing': ['None Missing', 'Parts Missing'],
+  'Tower Step Bolt': ['OK', 'Missing', 'Loose'],
+  'Tower Vegetation Removal': ['Not Required', 'Required', 'Done'],
+  'Tower Welding Condition': ['Good', 'Fair', 'Poor'],
+  'Tree Cutting Spanwise': ['Not Required', 'Required', 'Done'],
+};
+const COMMON_DEFECT_STATUS_OPTIONS = [
+  'OK', 'Missing', 'Damaged', 'Loose', 'Broken', 'Cracked', 'Corroded',
+  'Bent', 'Displaced', 'Deformed', 'Burnt', 'Contaminated',
+  'Not Connected', 'Needs Attention', 'Not Applicable',
+];
+
+function updateDefectStatusOptions() {
+  const type = document.getElementById('df-defect-type').value;
+  const preferred = DEFECT_STATUS_OPTIONS[type] || [];
+  // Keep the technically relevant answers first, then make the complete
+  // common condition list available for every defect without duplicates.
+  const options = [...new Set([...preferred, ...COMMON_DEFECT_STATUS_OPTIONS])];
+  const statusSelect = document.getElementById('df-status');
+  statusSelect.innerHTML = options.map(o => `<option value="${o}">${o}</option>`).join('');
+}
+
 function openDefectForm() {
   document.getElementById('df-component').value = '';
   document.getElementById('df-location').value = 'Top';
   document.getElementById('df-defect-type').value = '';
-  document.getElementById('df-status').value = 'OK';
+  updateDefectStatusOptions();
   document.getElementById('df-severity').value = 'Minor';
   document.getElementById('df-comments').value = '';
   document.getElementById('df-error').style.display = 'none';
@@ -3204,29 +3777,14 @@ async function submitDefectForm() {
 // one image fails, and reports a combined summary at the end instead of
 // interrupting with a popup per file.
 async function uploadPhotoToTower(lineId, towerLabel, file, lat, lng) {
-  const fd = new FormData();
-  fd.append('tower', towerLabel);
-  fd.append('image', file);
-  if (lat != null) fd.append('tower_lat', lat);
-  if (lng != null) fd.append('tower_lng', lng);
-
-  // A stalled connection on one upload shouldn't be able to freeze the
-  // rest of the batch — same reasoning as the EXIF read timeout above,
-  // just on the network side. 45s is generous for even a large photo on
-  // a slow field connection while still guaranteeing forward progress.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45000);
-
-  try {
-    const res = await fetch(`/api/lines/${lineId}/tower-photos`, { method: 'POST', body: fd, signal: controller.signal });
-    clearTimeout(timeoutId);
-    const data = await res.json();
-    if (!res.ok) return { ok: false, error: data.error || 'Upload failed.' };
-    return { ok: true, photo: data };
-  } catch (e) {
-    clearTimeout(timeoutId);
-    return { ok: false, error: e.name === 'AbortError' ? 'Upload timed out.' : 'Network error.' };
-  }
+  return uploadWithRetry(`/api/lines/${lineId}/tower-photos`, () => {
+    const fd = new FormData();
+    fd.append('tower', towerLabel);
+    fd.append('image', file);
+    if (lat != null) fd.append('tower_lat', lat);
+    if (lng != null) fd.append('tower_lng', lng);
+    return fd;
+  }, file);
 }
 
 async function deleteTowerPhoto(photoId) {
@@ -3246,6 +3804,7 @@ function buildKmlLayer(parsed, line, division, key) {
   const kmlGroup = L.layerGroup();
   const showNums = isLineShowingNumbers(key);
   const markersByLabel = {};
+  const pointFeatures = [];
   (parsed.geojson.features || []).forEach(feat => {
     const geom = feat.geometry;
     if (!geom) return;
@@ -3258,6 +3817,19 @@ function buildKmlLayer(parsed, line, division, key) {
         L.polyline(latlngs, { color: '#000000', weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }).addTo(kmlGroup);
       });
     } else if (geom.type === 'Point') {
+      pointFeatures.push(feat);
+    }
+  });
+
+  // Add tower markers in animation-frame batches. Large lines no longer
+  // freeze the page while thousands of DOM marker nodes are constructed.
+  let pointIndex = 0;
+  const addPointWindow = () => {
+    if (!kmlGroupsByKey[key] || kmlGroupsByKey[key] !== kmlGroup) return;
+    const end = Math.min(pointIndex + 180, pointFeatures.length);
+    for (; pointIndex < end; pointIndex++) {
+      const feat = pointFeatures[pointIndex];
+      const geom = feat.geometry, props = feat.properties || {};
       const [lng, lat] = geom.coordinates;
       const label = pickTowerLabel(props);
       const marker = L.marker([lat, lng], { icon: kmlTowerIcon() });
@@ -3273,12 +3845,14 @@ function buildKmlLayer(parsed, line, division, key) {
       marker.addTo(kmlGroup);
       markersByLabel[label] = { lat, lng };
     }
-  });
+    if (pointIndex < pointFeatures.length) requestAnimationFrame(addPointWindow);
+    else if (isLineShowingPhotoDots(key)) applyPhotoDots(line, key, kmlGroup);
+  };
   kmlGroup._towerMarkers = markersByLabel; // stashed for applyPhotoDots()
   kmlGroup._lineId = line.id;
   kmlGroup._lineKey = key;
   kmlGroupsByKey[key] = kmlGroup;
-  if (isLineShowingPhotoDots(key)) applyPhotoDots(line, key, kmlGroup);
+  requestAnimationFrame(addPointWindow);
   return kmlGroup;
 }
 
@@ -3515,6 +4089,7 @@ function toggleLineNumbers(divisionId, line, key, btnEl) {
 
 // ── Tower list sidebar + search (opened via a line's "#" numbers toggle) ──
 let sidebarTowerPoints = [];  // [{label, lat, lng}] for whichever line's sidebar is open
+let sidebarTowerSummary = {};
 
 async function openTowerListSidebar(line) {
   document.getElementById('pm-tower-sidebar-title').textContent = `Towers — ${line.name}`;
@@ -3548,6 +4123,7 @@ async function openTowerListSidebar(line) {
     const res = await fetch(`/api/lines/${line.id}/tower-summary`);
     const data = await res.json();
     summary = data.towers || {};
+    sidebarTowerSummary = summary;
   } catch (e) { /* falls through — rows just show as not-inspected/0 defects, the honest fallback */ }
 
   body.innerHTML = sidebarTowerPoints.map(t => {
@@ -3556,12 +4132,12 @@ async function openTowerListSidebar(line) {
       ? `<span class="pm-tower-row-status done">Inspection done</span>`
       : `<span class="pm-tower-row-status pending">Inspection not done</span>`;
     return `
-    <div class="pm-tower-row" data-label="${escapeHtml(t.label.toLowerCase())}" onclick="goToTowerLatLng(${t.lat}, ${t.lng})">
+    <div class="pm-tower-row" data-label="${escapeHtml(t.label.toLowerCase())}" data-done="${s.inspection_done ? '1' : '0'}" data-open="${s.open_defect_count || 0}" data-critical="${s.critical_defect_count || 0}" onclick="goToTowerLatLng(${t.lat}, ${t.lng}, '${escapeHtml(t.label).replace(/'/g, "\\'")}')">
       <div class="pm-tower-row-main">
         <span class="pm-tower-row-label">T${escapeHtml(t.label)}</span>
         ${statusBadge}
       </div>
-      <span class="pm-tower-row-defects" title="Defects marked">${s.defect_count}</span>
+      <span class="pm-tower-row-defects" title="Open defects">${s.open_defect_count || 0}</span>
     </div>`;
   }).join('');
 }
@@ -3570,12 +4146,20 @@ function closeTowerListSidebar() {
   document.getElementById('pm-tower-sidebar').classList.remove('open');
   document.getElementById('pm-tower-search-input').value = '';
   sidebarTowerPoints = [];
+  sidebarTowerSummary = {};
 }
 
 function filterTowerSidebarList(query) {
-  const q = query.trim().toLowerCase();
+  const input = document.getElementById('pm-tower-search-input');
+  const q = (typeof query === 'string' ? query : (input ? input.value : '')).trim().toLowerCase();
+  const filter = document.getElementById('pm-tower-status-filter')?.value || 'all';
   document.querySelectorAll('#pm-tower-sidebar-body .pm-tower-row').forEach(row => {
-    row.classList.toggle('no-match', q !== '' && !row.dataset.label.includes(q));
+    const textMismatch = q !== '' && !row.dataset.label.includes(q);
+    const statusMismatch = (filter === 'pending' && row.dataset.done === '1') ||
+      (filter === 'done' && row.dataset.done !== '1') ||
+      (filter === 'open' && Number(row.dataset.open || 0) < 1) ||
+      (filter === 'critical' && Number(row.dataset.critical || 0) < 1);
+    row.classList.toggle('no-match', textMismatch || statusMismatch);
   });
 }
 
@@ -3586,8 +4170,18 @@ function goToFirstMatchingTower() {
   if (match) goToTowerLatLng(match.lat, match.lng);
 }
 
-function goToTowerLatLng(lat, lng) {
+function goToTowerLatLng(lat, lng, label) {
   pmMap.setView([lat, lng], 18);
+  if (label) sessionStorage.setItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`, label);
+}
+
+function goToAdjacentTower(direction) {
+  if (!sidebarTowerPoints.length) return;
+  const current = sessionStorage.getItem(`drogo-last-tower:${PROJECT_ID}:${SELECTED_DIVISION_ID}`) || currentTowerLabel || '';
+  let index = sidebarTowerPoints.findIndex(t => t.label === current);
+  if (index < 0) index = direction > 0 ? -1 : 0;
+  const next = sidebarTowerPoints[(index + direction + sidebarTowerPoints.length) % sidebarTowerPoints.length];
+  if (next) goToTowerLatLng(next.lat, next.lng, next.label);
 }
 
 function syncLineNumberButtonUI(key) {
@@ -3779,6 +4373,11 @@ function showLineDetails(divisionId, line) {
         <div class="tw-folder-hint">Select a folder of geo-tagged photos (subfolders OK, videos are skipped). Each image is matched to whichever tower point is within 70m of its own GPS location.</div>
       </div>
       <div id="tw-folder-progress"></div>
+      <div class="tw-folder-upload-row" style="margin-top:8px;">
+        <button type="button" class="tw-folder-upload-btn" onclick="showUploadHistory(${line.id})">Upload Status &amp; History</button>
+      </div>
+      <div class="tw-folder-hint">To retry failures, select the same folder again. Completed images are detected as duplicates and kept; only missing/failed images are added.</div>
+      <div id="tw-upload-history"></div>
       <div class="tw-folder-upload-row" style="margin-top:10px;">
         <label class="tw-folder-upload-btn">
           + Add Corridor Photos
@@ -3913,7 +4512,7 @@ async function loadSmeAssignmentUI(lineId, forceEdit) {
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--bg-elevated-2);border-radius:8px;">
           <div>
             <div style="font-size:12px;font-weight:700;color:var(--text-primary);">✓ ${escapeHtml(current.sme_name)}</div>
-            <div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Saved · assigned ${escapeHtml(current.assigned_at)}</div>
+            <div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">${escapeHtml(current.sme_email || '')}${current.sme_email ? ' · ' : ''}Saved · assigned ${escapeHtml(current.assigned_at)}</div>
           </div>
           <button class="btn-secondary" style="padding:6px 12px;font-size:11.5px;flex-shrink:0;" onclick="loadSmeAssignmentUI(${lineId}, true)">Edit</button>
         </div>
@@ -3922,7 +4521,7 @@ async function loadSmeAssignmentUI(lineId, forceEdit) {
       return;
     }
 
-    const options = smes.map(s => `<option value="${s.id}" ${current && current.sme_user_id === s.id ? 'selected' : ''}>${escapeHtml(s.username)}</option>`).join('');
+    const options = smes.map(s => `<option value="${s.id}" ${current && current.sme_user_id === s.id ? 'selected' : ''}>${escapeHtml(s.username)} — ${escapeHtml(s.email)}</option>`).join('');
     body.innerHTML = `
       <div style="display:flex;gap:8px;align-items:center;">
         <select id="tw-sme-select" class="modal-select" style="flex:1;">
@@ -4089,6 +4688,36 @@ function showConfirm(message, confirmLabel = 'Delete') {
     overlay.querySelector('#app-confirm-cancel').onclick = () => cleanup(false);
     overlay.querySelector('#app-confirm-ok').onclick = () => cleanup(true);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+  });
+}
+
+function promptForDefectAction(action) {
+  return new Promise((resolve) => {
+    const closing = action === 'close';
+    const overlay = document.createElement('div');
+    overlay.className = 'app-confirm-overlay';
+    overlay.innerHTML = `
+      <div class="app-confirm-box">
+        <div class="app-confirm-msg">${closing ? 'Close this defect' : 'Reopen this defect'}</div>
+        <textarea id="app-comment-input" class="app-comment-textarea" rows="3" placeholder="${closing ? 'What was done to fix this?' : 'Why is this defect being reopened?'} (required)"></textarea>
+        ${closing ? `<div style="margin-top:10px;text-align:left;"><label style="display:block;font-size:11px;font-weight:700;color:var(--text-secondary);margin-bottom:5px;">Rectification image (optional)</label><input id="app-evidence-input" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" style="font-size:11.5px;color:var(--text-secondary);"/></div>` : ''}
+        <div class="app-confirm-actions">
+          <button type="button" class="btn-ghost" id="app-comment-cancel">Cancel</button>
+          <button type="button" class="btn-primary" id="app-comment-ok">${closing ? 'Close Defect' : 'Reopen Defect'}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#app-comment-input');
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+    overlay.querySelector('#app-comment-cancel').onclick = () => cleanup(null);
+    overlay.querySelector('#app-comment-ok').onclick = () => {
+      const val = input.value.trim();
+      if (!val) { input.focus(); input.classList.add('error'); return; }
+      const evidenceInput = overlay.querySelector('#app-evidence-input');
+      cleanup({ comment: val, evidence: evidenceInput && evidenceInput.files.length ? evidenceInput.files[0] : null });
+    };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(null); });
+    setTimeout(() => input.focus(), 50);
   });
 }
 </script>

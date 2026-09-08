@@ -1,78 +1,23 @@
 """
-seed_db.py — Creates all tables and seeds the database with demo users.
+seed_db.py — Creates lookup data and optional demo projects.
 
-Run once after setting up the project:
+Run once after applying migrations:
+    flask --app app db upgrade
     python seed_db.py
 
-Safe to re-run: existing users are skipped (matched by email).
+Safe to re-run: existing projects and lookup records are preserved.
 """
 from app import create_app
 from models import db, Role, Module
 from users import _get_or_create_role, _get_or_create_module, ROLES, MODULES, MODULE_ROUTES
-from werkzeug.security import generate_password_hash
 import os
 
 app = create_app()
 
-SEED_USERS = [
-    {
-        'username': 'Sunil Kumar',
-        'email':    'sunil@drogodrones.com',
-        'password': 'admin123',
-        'contact':  '+91 98765 43210',
-        'roles':    ['Admin', 'Client User'],
-        'modules':  ['Transmission Line', 'TRANS'],
-        'status':   'Active',
-    },
-    {
-        'username': 'Ramesh Patel',
-        'email':    'ramesh@drogodrones.com',
-        'password': 'client123',
-        'contact':  '+91 91234 56780',
-        'roles':    ['Client User'],
-        'modules':  ['Transmission Line'],
-        'status':   'Active',
-    },
-    {
-        'username': 'Anjali Sharma',
-        'email':    'anjali@drogodrones.com',
-        'password': 'client123',
-        'contact':  '+91 99887 76655',
-        'roles':    ['Client User'],
-        'modules':  ['TRANS'],
-        'status':   'Pending',
-    },
-    {
-        'username': 'Vikram Singh',
-        'email':    'vikram@drogodrones.com',
-        'password': 'pilot123',
-        'contact':  '+91 90909 12121',
-        'roles':    ['Pilot'],
-        'modules':  [],
-        'status':   'Active',
-    },
-    {
-        'username': 'Meena Rao',
-        'email':    'meena@drogodrones.com',
-        'password': 'admin123',
-        'contact':  '+91 98001 22334',
-        'roles':    ['Admin'],
-        'modules':  ['Transmission Line', 'TRANS'],
-        'status':   'Inactive',
-    },
-]
-
-
 def seed():
-    from models import User
-
     os.makedirs('instance', exist_ok=True)
 
     with app.app_context():
-        # ── Create all tables ─────────────────────────────────────────────────
-        db.create_all()
-        print("✓ Tables created (or already exist)")
-
         # ── Seed lookup tables ────────────────────────────────────────────────
         for r in ROLES:
             _get_or_create_role(r)
@@ -86,33 +31,6 @@ def seed():
                 mod.route = MODULE_ROUTES.get(m, '')
         db.session.commit()
         print("✓ Roles and modules seeded")
-
-        # ── Seed users ────────────────────────────────────────────────────────
-        created = 0
-        skipped = 0
-        for data in SEED_USERS:
-            existing = User.query.filter_by(email=data['email']).first()
-            if existing:
-                skipped += 1
-                continue
-
-            user = User(
-                username      = data['username'],
-                email         = data['email'],
-                password_hash = generate_password_hash(data['password']),
-                contact       = data['contact'],
-                status        = data['status'],
-            )
-            for role_name in data['roles']:
-                user.roles.append(_get_or_create_role(role_name))
-            for mod_name in data['modules']:
-                user.modules.append(_get_or_create_module(mod_name))
-
-            db.session.add(user)
-            created += 1
-
-        db.session.commit()
-        print(f"✓ Users: {created} created, {skipped} already existed")
 
         # ── Seed demo Transmission Line projects ────────────────────────────────
         from models import Project, Division, Line
@@ -150,14 +68,6 @@ def seed():
 
         db.session.commit()
         print("✓ Demo projects seeded (DVC, MPPTCL)")
-        print()
-        print("═══ Demo credentials ═══════════════════════════════")
-        print("  Admin:       sunil@drogodrones.com  / admin123")
-        print("  Admin:       meena@drogodrones.com  / admin123")
-        print("  Client User: ramesh@drogodrones.com / client123")
-        print("  Client User: anjali@drogodrones.com / client123")
-        print("  Client User: vikram@drogodrones.com / client123")
-        print("════════════════════════════════════════════════════")
 
 
 if __name__ == '__main__':

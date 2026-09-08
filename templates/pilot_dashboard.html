@@ -34,7 +34,7 @@
     </div>
     <div style="display:flex;align-items:center;gap:16px;">
       <span style="font-size:13px;color:var(--text-secondary);">{{ user_name }}</span>
-      <a href="{{ url_for('logout') }}" class="btn-logout">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
     </div>
   </nav>
 

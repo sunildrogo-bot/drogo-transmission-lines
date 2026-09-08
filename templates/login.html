@@ -401,6 +401,7 @@
         {% endif %}
 
         <form method="POST" action="{{ url_for('login') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
             <div class="role-card" id="roleCard">
 
@@ -483,6 +484,7 @@
                                 required
                             >
                         </div>
+                        <a href="{{ url_for('forgot_password') }}" style="display:block;text-align:right;margin-top:8px;font-size:11.5px;color:#6b6f76;text-decoration:none;">Forgot password?</a>
                     </div>
 
                 </div>

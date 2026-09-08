@@ -3,9 +3,6 @@
 {% block title %}Drogo Aerospace — Transmission Line Inspection{% endblock %}
 
 {% block head %}
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
 <style>
   :root{
     --paper:#F6F0E4;--paper-2:#EDE3D2;--ink:#241C16;--muted:#7B6E5F;
@@ -13,10 +10,10 @@
     --amber:#0FA98A;--cyan:#46CDB0;--teal:#0A8E75;--brass:#B8894A;--line:rgba(36,28,22,0.14);
   }
   .home-page *{box-sizing:border-box;}
-  .home-page{background:var(--paper);color:var(--ink);font-family:'Inter',sans-serif;font-weight:300;overflow-x:hidden;}
+  .home-page{background:var(--paper);color:var(--ink);font-family:'Segoe UI',Arial,sans-serif;font-weight:300;overflow-x:hidden;}
   .home-page a{color:inherit;text-decoration:none;}
-  .home-page .serif{font-family:'Cormorant Garamond',serif;}
-  .home-page .mono{font-family:'IBM Plex Mono',monospace;}
+  .home-page .serif{font-family:Georgia,'Times New Roman',serif;}
+  .home-page .mono{font-family:Consolas,'Courier New',monospace;}
   .home-page .label{font-size:11px;letter-spacing:0.24em;text-transform:uppercase;}
 
   .home-page .subnav{position:fixed;top:0;left:0;right:0;z-index:70;display:flex;align-items:center;justify-content:space-between;gap:30px;padding:12px 40px;background:rgba(20,15,11,0.5);backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);border-bottom:1px solid rgba(242,234,221,0.1);transition:background .3s ease,border-color .3s ease;}
@@ -173,7 +170,7 @@
       <a href="#thermal">Thermal</a>
       <a href="#roles">Platform</a>
       {% if session.get('user_id') %}
-      <a href="{{ url_for('logout') }}" class="cta">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}" style="display:inline;"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="cta" style="background:transparent;cursor:pointer;font:inherit;">Logout</button></form>
       {% else %}
       <a href="{{ url_for('login') }}" class="cta">Login</a>
       {% endif %}

@@ -39,7 +39,8 @@ drogo_trans_pilot/
 ├── help_routes.py                  # Support ticket system
 ├── load_monitor.py                 # In-memory server load tracking (admin dashboard chart)
 ├── mailer.py                       # Gmail SMTP — welcome emails
-├── migrate_add_defect_columns.py   # Self-healing schema migrations, runs on every startup
+├── migrations/                     # Versioned Flask-Migrate/Alembic database revisions
+├── migrate_add_defect_columns.py   # Deprecated legacy compatibility utility
 ├── seed_db.py                      # One-time demo data seeding script
 ├── tower_report.py                 # Per-tower PDF report builder
 ├── trans_report.py                 # Whole-project PDF report builder (TRANS module)
@@ -83,7 +84,7 @@ drogo_trans_pilot/
 
 | File | Purpose | Lines |
 |---|---|---|
-| **`app.py`** | The Flask **application factory**. Creates the Flask app, configures the database connection, registers every blueprint (the other route files), defines the core page routes (`/login`, `/logout`, `/admin`, `/dashboard`, `/pilot`, `/pilot/lines/<id>`, `/projects`, `/trans`), and wires in the self-healing migration on every startup. | 290 |
+| **`app.py`** | The Flask **application factory**. Creates the Flask app, configures the database connection, registers every blueprint (the other route files), defines the core page routes (`/login`, `/logout`, `/admin`, `/dashboard`, `/pilot`, `/pilot/lines/<id>`, `/projects`, `/trans`), and validates authenticated sessions against current database state. | 290 |
 | **`models.py`** | Every database table, defined as a SQLAlchemy class: `User`, `Role`, `Module`, `Project`, `Division`, `Line`, `TowerPhoto`, `TowerDefect`, `TowerReport`, `TowerInspectionStatus` (inspection-done flag + pilot's zone classification), `PilotAssignment`, `Announcement`, `HelpTicket`, `ActivityLog`, `AppSetting`. Each class has a `to_dict()` method used to serialize it to JSON for the API. | 590 |
 | **`projects_routes.py`** | The biggest file — the core API for the Transmission Line / TRANS modules. Covers: Project/Division/Line CRUD, KML upload, tower photo upload (both admin's regular upload and the pilot's live-camera capture path), tower defect marking, the "Inspection Done" and "Zone" per-tower status system, pilot assignment, and PDF report generation triggers. | 1,289 |
 | **`assistant_api.py`** | The AI chat widget's backend. A tool-calling agent using Google's Gemini API — lets a user ask natural-language questions ("how many critical defects on Line 2?") and the AI calls real database-query functions to answer, respecting the same permission rules as the rest of the app. | 446 |
@@ -95,8 +96,9 @@ drogo_trans_pilot/
 | **`help_routes.py`** | Support ticket system — any user can raise a ticket, Admin moves it through Open → Checking → Resolved, and the original reporter gets notified of status changes. | ~150 |
 | **`load_monitor.py`** | Tracks request timing and active-user counts **in memory**, purely for the admin dashboard's live load chart. Explicitly documented as single-process-only — won't be accurate if the app ever runs with multiple worker processes. | ~120 |
 | **`mailer.py`** | Sends the "welcome, here's your password" email to newly created users via Gmail SMTP, using an App Password (not the account's real password). | ~60 |
-| **`migrate_add_defect_columns.py`** | Runs automatically every time the app starts. Checks the live database for any columns the current code expects but the table doesn't have yet (e.g. after a code update adds a new field), and adds them with `ALTER TABLE`. This is how the app stays in sync with schema changes without needing a manual migration step — genuinely important, since a couple of real bugs earlier in this project's history came from forgetting to register a new column here. | ~200 |
-| **`seed_db.py`** | A one-time script (`python seed_db.py`) that creates all tables and inserts demo accounts (Admin/Client/Pilot) and demo projects, for getting a fresh install up and running quickly. | ~180 |
+| **`migrations/`** | Ordered Flask-Migrate/Alembic revisions. Run `flask --app app db upgrade` before starting a new release; the app does not mutate the schema during startup. | — |
+| **`migrate_add_defect_columns.py`** | Deprecated compatibility utility for pre-Alembic installations. It is retained for reference but is no longer imported at startup and must not be mixed with the versioned history. | ~400 |
+| **`seed_db.py`** | An optional demo-data script (`python seed_db.py`) to run after `flask --app app db upgrade` on a fresh database. | ~180 |
 | **`settings.py`** | Small helper module — just the shared delete-password get/set/verify logic, factored out of `settings_routes.py`. | ~30 |
 | **`tower_report.py`** | Builds the **per-tower PDF report** ("RGB Visual Inspection Report") — one tower's defects, 2 per page, full-page format, corporate navy/gold styling. | ~330 |
 | **`trans_report.py`** | Builds the **whole-project PDF report** for Transmission Line/TRANS — every tower's defects in one document, grouped by division and line. | ~250 |

@@ -68,6 +68,8 @@ def api_create_announcement():
         dest_path = os.path.join(dest_dir, filename)
         file.save(dest_path)
         ann.image_path = os.path.relpath(dest_path, os.path.join(current_app.root_path, 'static')).replace(os.sep, '/')
+        from storage_service import get_storage
+        get_storage().publish(ann.image_path, dest_path)
 
     db.session.commit()
     return jsonify(ann.to_dict()), 201
@@ -80,12 +82,8 @@ def api_delete_announcement(ann_id):
         return guard
     ann = Announcement.query.get_or_404(ann_id)
     if ann.image_path:
-        img_path = os.path.join(current_app.root_path, 'static', ann.image_path)
-        if os.path.exists(img_path):
-            try:
-                os.remove(img_path)
-            except OSError:
-                pass
+        from storage_cleanup import delete_stored_files
+        delete_stored_files([ann.image_path])
     db.session.delete(ann)
     db.session.commit()
     return jsonify({'deleted': ann_id})
