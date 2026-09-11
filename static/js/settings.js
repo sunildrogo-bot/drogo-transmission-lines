@@ -17,6 +17,7 @@ function settingsNav(viewId, el) {
   if (viewId === 'view-uploads') {
     loadStorageSummary();
     loadThumbnailRepair();
+    loadDuplicatePhotos();
     loadAllProjects();
     loadDataHealth();
     loadBackupHistory();
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('help-tab-badge')) refreshHelpBadge();
   installTaxonomyManager();
   installBackupManager();
+  installDuplicatePhotoManager();
   installCompatibilityManager();
   installActivityControls();
   installProductionHealthManager();
@@ -51,6 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 let backupPollTimer = null;
+let duplicatePhotoPollTimer = null;
 
 function createStorageTool(id, title, copy, glyph, order, wide = false) {
   const grid = document.getElementById('storage-tool-grid');
@@ -66,6 +69,151 @@ function createStorageTool(id, title, copy, glyph, order, wide = false) {
   </summary><div class="storage-tool-body"></div>`;
   grid.appendChild(details);
   return details.querySelector('.storage-tool-body');
+}
+
+function installDuplicatePhotoManager() {
+  const view = document.getElementById('view-uploads');
+  if (!view || document.getElementById('duplicate-photo-manager')) return;
+  const wrap = createStorageTool('duplicate-photo-manager', 'Duplicate images',
+    'Find exact re-uploads, protect inspection evidence, and remove only safe copies.', '≡', 15, true);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="settings-card">
+    <div class="settings-card-title">Exact duplicate image control</div>
+    <div class="settings-card-desc">The scan compares original file fingerprints, not filenames. It does not delete anything. Cleanup keeps the canonical image and never auto-removes conflicting tower assignments or multiple copies containing review, defect, thermal, or audit evidence.</div>
+    <div class="backup-health-grid" id="duplicate-photo-summary"><div class="backup-message" style="grid-column:1/-1">Run a scan to inspect existing uploads.</div></div>
+    <div id="duplicate-photo-details"></div>
+    <div class="backup-actions" style="align-items:center">
+      <button type="button" class="btn-ghost" id="duplicate-scan-btn" onclick="startDuplicatePhotoScan()">Scan Exact Duplicates</button>
+      <input type="password" class="modal-select" id="duplicate-delete-password" placeholder="Delete password" autocomplete="off" style="max-width:190px" data-lpignore="true" data-1p-ignore="true" data-bwignore="true">
+      <button type="button" class="btn-primary" id="duplicate-cleanup-btn" onclick="startDuplicatePhotoCleanup()" disabled>Remove Safe Copies</button>
+    </div>
+    <div id="duplicate-photo-status" class="backup-message" style="margin-top:12px">No duplicate scan has run yet.</div>
+  </div>`;
+}
+
+function duplicateStat(label, value, note) {
+  return `<div class="backup-health-stat"><div class="backup-health-label">${escapeHtml(label)}</div><div class="backup-health-value">${Number(value || 0).toLocaleString()}</div><div class="backup-health-note">${escapeHtml(note)}</div></div>`;
+}
+
+async function loadDuplicatePhotos() {
+  const summary = document.getElementById('duplicate-photo-summary');
+  const details = document.getElementById('duplicate-photo-details');
+  const status = document.getElementById('duplicate-photo-status');
+  const scanButton = document.getElementById('duplicate-scan-btn');
+  const cleanupButton = document.getElementById('duplicate-cleanup-btn');
+  if (!summary || !details || !status || !scanButton || !cleanupButton) return;
+  try {
+    const response = await fetch('/api/settings/duplicate-photos');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not load duplicate-image status.');
+    const jobs = data.jobs || [];
+    const active = jobs.find(job => ['Queued', 'Processing'].includes(job.status));
+    const latest = jobs[0];
+    clearTimeout(duplicatePhotoPollTimer);
+    scanButton.disabled = !!active;
+    cleanupButton.disabled = true;
+
+    if (active) {
+      const total = Number(active.progress_total || 0);
+      const current = Number(active.progress_current || 0);
+      const label = active.job_type === 'duplicate_photo_cleanup' ? 'Removing safe copies' : 'Scanning stored originals';
+      summary.innerHTML = duplicateStat('Progress', current, total ? `${current} of ${total} photos` : 'Preparing scan');
+      details.innerHTML = '';
+      status.className = 'backup-message';
+      status.textContent = `${label}… Keep the background worker running.`;
+      duplicatePhotoPollTimer = setTimeout(loadDuplicatePhotos, 2000);
+      return;
+    }
+
+    if (!latest) {
+      summary.innerHTML = '<div class="backup-message" style="grid-column:1/-1">Run a scan to fingerprint legacy images and identify exact duplicates.</div>';
+      details.innerHTML = '';
+      status.textContent = 'Scanning is read-only. Cleanup is a separate password-protected action.';
+      return;
+    }
+
+    if (latest.status === 'Failed') {
+      summary.innerHTML = duplicateStat('Status', 0, 'Scan needs attention');
+      details.innerHTML = '';
+      status.className = 'backup-message warn';
+      status.textContent = latest.error || 'Duplicate-image task failed.';
+      return;
+    }
+
+    const result = latest.result || {};
+    if (latest.job_type === 'duplicate_photo_cleanup') {
+      summary.innerHTML = duplicateStat('Removed', result.deleted_photos, 'redundant photo records') +
+        duplicateStat('Files cleared', result.deleted_files, 'unreferenced stored copies') +
+        duplicateStat('Protected', result.remaining_protected_groups, 'groups needing manual review') +
+        duplicateStat('Tower conflicts', result.remaining_tower_conflicts, 'never auto-deleted');
+      details.innerHTML = '';
+      status.className = result.cleanup_errors?.length ? 'backup-message warn' : 'backup-message';
+      status.textContent = result.cleanup_errors?.length
+        ? `Cleanup completed with ${result.cleanup_errors.length} file warning(s). Run Data Health, then scan again.`
+        : 'Safe duplicate cleanup completed. Run Scan Exact Duplicates again to verify the final state.';
+      return;
+    }
+
+    const safeGroups = result.safe_groups || [];
+    const protectedCount = (result.protected_groups || []).length;
+    const conflictCount = (result.tower_conflicts || []).length;
+    summary.innerHTML = duplicateStat('Photos scanned', result.photos_scanned, `${Number(result.hashes_added || 0).toLocaleString()} legacy fingerprints added`) +
+      duplicateStat('Safe copies', result.safe_to_remove, `${safeGroups.length} exact duplicate group${safeGroups.length === 1 ? '' : 's'}`) +
+      duplicateStat('Protected groups', protectedCount, 'evidence retained') +
+      duplicateStat('Tower conflicts', conflictCount, 'manual review required');
+    const visibleGroups = safeGroups.slice(0, 20);
+    details.innerHTML = visibleGroups.length ? `<div class="backup-message"><strong>Safe duplicate groups</strong><div style="display:grid;gap:6px;margin-top:8px">${visibleGroups.map(group =>
+      `<div>${escapeHtml(group.project_name || 'Project')} · ${escapeHtml(group.line_name)} · Tower ${escapeHtml(group.tower_label)} — keep photo #${Number(group.keeper_photo_id)}, remove ${group.delete_photo_ids.map(id => `#${Number(id)}`).join(', ')}</div>`
+    ).join('')}</div>${safeGroups.length > visibleGroups.length ? `<div style="margin-top:8px">${safeGroups.length - visibleGroups.length} more group(s) are included in cleanup.</div>` : ''}</div>` : '';
+    cleanupButton.disabled = !Number(result.safe_to_remove || 0);
+    status.className = (protectedCount || conflictCount || result.missing_files) ? 'backup-message warn' : 'backup-message';
+    status.textContent = Number(result.safe_to_remove || 0)
+      ? 'Review the counts, enter the shared delete password, then remove only the confirmed safe copies.'
+      : (result.duplicate_groups ? 'No group is safe for automatic removal; protected/conflicting copies remain unchanged.' : 'No exact duplicate tower images were found.');
+  } catch (error) {
+    status.className = 'backup-message warn';
+    status.textContent = error.message;
+  }
+}
+
+async function startDuplicatePhotoScan() {
+  const button = document.getElementById('duplicate-scan-btn');
+  if (button) { button.disabled = true; button.textContent = 'Scan Queued…'; }
+  try {
+    const response = await fetch('/api/settings/duplicate-photos/scan', {method:'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not queue duplicate scan.');
+    await loadDuplicatePhotos();
+  } catch (error) {
+    const status = document.getElementById('duplicate-photo-status');
+    status.className = 'backup-message warn'; status.textContent = error.message;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Scan Exact Duplicates'; }
+  }
+}
+
+async function startDuplicatePhotoCleanup() {
+  const passwordInput = document.getElementById('duplicate-delete-password');
+  const password = passwordInput?.value || '';
+  const status = document.getElementById('duplicate-photo-status');
+  if (!password) {
+    status.className = 'backup-message warn';
+    status.textContent = 'Enter the shared delete password before cleanup.';
+    passwordInput?.focus();
+    return;
+  }
+  if (!window.confirm('Remove only the exact duplicate copies classified as safe? Canonical images and all protected evidence will remain.')) return;
+  try {
+    const response = await fetch('/api/settings/duplicate-photos/cleanup', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not queue duplicate cleanup.');
+    passwordInput.value = '';
+    await loadDuplicatePhotos();
+  } catch (error) {
+    status.className = 'backup-message warn'; status.textContent = error.message;
+  }
 }
 
 function installCompatibilityManager() {

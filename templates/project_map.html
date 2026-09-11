@@ -297,6 +297,7 @@
   .lightbox-prev{left:16px;}
   .lightbox-next{right:16px;}
   .lightbox-nav:hover{background:rgba(255,255,255,.22);}
+  .lightbox-nav:disabled{opacity:.28;cursor:not-allowed;background:rgba(255,255,255,.08);}
   .lightbox-counter{color:rgba(255,255,255,.8);font-size:12.5px;font-weight:600;}
 
   /* Marking toolbar — "Start Marking" floats over the image's top-right
@@ -616,10 +617,10 @@
      defect panel sit outside that layer and stay fixed-size. The defect
      form itself is a full-height drawer sliding in from the screen's left
      edge, not a floating card. ── -->
-<div class="photo-lightbox" id="photo-lightbox" onclick="if(event.target===this) closePhotoLightbox()">
-  <button class="lightbox-close" onclick="closePhotoLightbox()" title="Close">✕</button>
+<div class="photo-lightbox" id="photo-lightbox" role="dialog" aria-modal="true" aria-label="Image review">
+  <button type="button" class="lightbox-close" onclick="closePhotoLightbox()" title="Close">✕</button>
   <div class="lightbox-main-row">
-    <button class="lightbox-nav lightbox-prev" id="lightbox-prev" onclick="lightboxPrev()" title="Previous">‹</button>
+    <button type="button" class="lightbox-nav lightbox-prev" id="lightbox-prev" onclick="lightboxPrev()" title="Previous">‹</button>
     <div class="lightbox-img-wrap" id="lightbox-img-wrap">
       <div class="lightbox-zoom-layer" id="lightbox-zoom-layer">
         <img class="lightbox-img" id="lightbox-img" src="" alt="" draggable="false"/>
@@ -629,21 +630,21 @@
       <!-- Zoom controls — available to everyone (Admin + Client), not
            just marking. Zooms only the image above via lightbox-zoom-layer. -->
       <div class="lightbox-zoom-controls" id="lightbox-zoom-controls">
-        <button class="lb-zoom-btn" onclick="zoomImage(1)" title="Zoom in">+</button>
-        <button class="lb-zoom-btn" onclick="zoomImage(-1)" title="Zoom out">−</button>
-        <button class="lb-zoom-btn" onclick="openOriginalImage()" title="Open the full original file in a new tab (true uploaded quality)" style="font-size:15px;">⤢</button>
+        <button type="button" class="lb-zoom-btn" onclick="zoomImage(1)" title="Zoom in">+</button>
+        <button type="button" class="lb-zoom-btn" onclick="zoomImage(-1)" title="Zoom out">−</button>
+        <button type="button" class="lb-zoom-btn" onclick="openOriginalImage()" title="Open the full original file in a new tab (true uploaded quality)" style="font-size:15px;">⤢</button>
       </div>
 
       {% if can_inspect %}
       <div class="lightbox-defect-toolbar" id="lightbox-defect-toolbar">
-        <button class="lb-tool-btn lb-start-btn" id="lb-mark-btn" onclick="toggleMarkDefectMode()">Start Marking</button>
+        <button type="button" class="lb-tool-btn lb-start-btn" id="lb-mark-btn" onclick="toggleMarkDefectMode()">Start Marking</button>
       </div>
       <div class="lightbox-shape-tools" id="lightbox-shape-tools">
-        <button class="lb-tool-btn lb-tool-shape" data-tool="polygon" onclick="selectDefectTool('polygon')" style="display:none;" title="Polygon">⬠</button>
-        <button class="lb-tool-btn lb-tool-shape" data-tool="rect" onclick="selectDefectTool('rect')" style="display:none;" title="Rectangle">▭</button>
-        <button class="lb-tool-btn lb-tool-shape" data-tool="circle" onclick="selectDefectTool('circle')" style="display:none;" title="Circle">◯</button>
-        <button class="lb-tool-btn" id="lb-tool-done" style="display:none;" onclick="finishDefectDraw()" title="Finish polygon">✓</button>
-        <button class="lb-tool-btn" id="lb-tool-cancel" style="display:none;" onclick="cancelDefectMarking()" title="Cancel this shape">✕</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="polygon" onclick="selectDefectTool('polygon')" style="display:none;" title="Polygon">⬠</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="rect" onclick="selectDefectTool('rect')" style="display:none;" title="Rectangle">▭</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="circle" onclick="selectDefectTool('circle')" style="display:none;" title="Circle">◯</button>
+        <button type="button" class="lb-tool-btn" id="lb-tool-done" style="display:none;" onclick="finishDefectDraw()" title="Finish polygon">✓</button>
+        <button type="button" class="lb-tool-btn" id="lb-tool-cancel" style="display:none;" onclick="cancelDefectMarking()" title="Cancel this shape">✕</button>
       </div>
       {% endif %}
       <!-- Thermal-only, everyone (Admin + Client): click "Measure Temp" to
@@ -658,13 +659,13 @@
            photos, same spot the marking toolbar occupies on RGB ones
            (never both at once). -->
       <div class="lightbox-defect-toolbar" id="lightbox-thermal-toolbar" style="display:none;">
-        <button class="lb-tool-btn lb-start-btn" id="lb-thermal-btn" onclick="toggleThermalMeasureMode()">Measure Temp</button>
+        <button type="button" class="lb-tool-btn lb-start-btn" id="lb-thermal-btn" onclick="toggleThermalMeasureMode()">Measure Temp</button>
       </div>
       <div class="lightbox-shape-tools" id="lightbox-thermal-shape-tools">
-        <button class="lb-tool-btn lb-tool-shape" data-tool="point" onclick="selectThermalTool('point')" title="Point">●</button>
-        <button class="lb-tool-btn lb-tool-shape" data-tool="rect" onclick="selectThermalTool('rect')" title="Rectangle">▭</button>
-        <button class="lb-tool-btn lb-tool-shape" data-tool="line" onclick="selectThermalTool('line')" title="Line">╱</button>
-        <button class="lb-tool-btn" id="lb-thermal-cancel" style="display:none;" onclick="cancelThermalDraw()" title="Cancel this measurement">✕</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="point" onclick="selectThermalTool('point')" title="Point">●</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="rect" onclick="selectThermalTool('rect')" title="Rectangle">▭</button>
+        <button type="button" class="lb-tool-btn lb-tool-shape" data-tool="line" onclick="selectThermalTool('line')" title="Line">╱</button>
+        <button type="button" class="lb-tool-btn" id="lb-thermal-cancel" style="display:none;" onclick="cancelThermalDraw()" title="Cancel this measurement">✕</button>
       </div>
 
       <!-- Color-scale bar — thermal only, everyone (Admin + Client). Shows
@@ -704,7 +705,7 @@
       </div>
     </div>
 
-    <button class="lightbox-nav lightbox-next" id="lightbox-next" onclick="lightboxNext()" title="Next">›</button>
+    <button type="button" class="lightbox-nav lightbox-next" id="lightbox-next" onclick="lightboxNext()" title="Next">›</button>
   </div>
   <div class="lightbox-counter" id="lightbox-counter"></div>
   <div class="lightbox-defect-list" id="lightbox-defect-list"></div>
@@ -712,13 +713,13 @@
   <!-- Defect form — full-height drawer, off-screen (translated left) until
        a shape is finished, then slides in over the screen's left edge. -->
   <div class="lightbox-defect-panel" id="lightbox-defect-panel">
-    <div class="ldp-inner">
+    <form class="ldp-inner" id="defect-details-form" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" onsubmit="event.preventDefault(); submitDefectForm();">
       <div class="ldp-header">
         <div class="ldp-title" id="df-panel-title">Mark Defect</div>
         <button type="button" class="ldp-close" onclick="cancelDefectForm()" title="Close">✕</button>
       </div>
       <div class="ldp-body">
-        <div class="field"><label>Component Name</label><input id="df-component" list="inspection-components" placeholder="e.g. Cross Arm" onchange="applyTaxonomyDefectOptions()"/><datalist id="inspection-components"></datalist></div>
+        <div class="field"><label for="df-component">Component Name</label><input id="df-component" name="inspection_component" list="inspection-components" placeholder="e.g. Cross Arm" autocomplete="off" autocorrect="off" autocapitalize="words" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" onchange="applyTaxonomyDefectOptions()"/><datalist id="inspection-components"></datalist></div>
         <div class="field">
           <label>Location</label>
           <select id="df-location">
@@ -731,7 +732,7 @@
         </div>
         <div class="field">
           <label>Defect Type</label>
-          <input type="search" id="df-defect-type-search" placeholder="Search defect type…" autocomplete="off" oninput="filterDefectTypeOptions(this.value)"/>
+          <input type="search" id="df-defect-type-search" name="inspection_defect_search" placeholder="Search defect type…" autocomplete="off" autocorrect="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" oninput="filterDefectTypeOptions(this.value)"/>
           <select id="df-defect-type" onchange="updateDefectStatusOptions()">
             <option value="">— Select —</option>
             <option>Abnormal Sound</option>
@@ -834,14 +835,14 @@
             <option value="Critical">Critical</option>
           </select>
         </div>
-        <div class="field"><label>Comments</label><textarea id="df-comments" rows="3" placeholder="Additional notes…"></textarea></div>
+        <div class="field"><label for="df-comments">Comments</label><textarea id="df-comments" name="inspection_comments" rows="3" placeholder="Additional notes…" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></textarea></div>
         <div class="error-msg" id="df-error" style="display:none;"></div>
       </div>
       <div class="ldp-footer">
         <button type="button" class="btn-ghost" onclick="cancelDefectForm()">Cancel</button>
-        <button type="button" class="btn-primary" id="df-submit-btn" onclick="submitDefectForm()">Save Defect</button>
+        <button type="submit" class="btn-primary" id="df-submit-btn">Save Defect</button>
       </div>
-    </div>
+    </form>
   </div>
 </div>
 
@@ -2809,8 +2810,14 @@ function renderLightboxImage() {
   };
   document.getElementById('lightbox-img').src = photo.image_url;
   document.getElementById('lightbox-counter').textContent = `${currentPhotoIndex + 1} / ${currentFilteredPhotos.length}`;
-  document.getElementById('lightbox-prev').style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
-  document.getElementById('lightbox-next').style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
+  const previousButton = document.getElementById('lightbox-prev');
+  const nextButton = document.getElementById('lightbox-next');
+  previousButton.style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
+  nextButton.style.visibility = currentFilteredPhotos.length > 1 ? 'visible' : 'hidden';
+  previousButton.disabled = currentPhotoIndex === 0;
+  nextButton.disabled = currentPhotoIndex === currentFilteredPhotos.length - 1;
+  previousButton.title = previousButton.disabled ? 'First image' : 'Previous image';
+  nextButton.title = nextButton.disabled ? 'Image sequence complete' : 'Next image';
   resetImgZoom();
   markDefectMode = false;
   cancelDefectMarking();
@@ -2876,22 +2883,39 @@ function renderLightboxImage() {
 
 function prefetchAdjacentPhotos() {
   if (currentFilteredPhotos.length < 2) return;
-  const indexes = [(currentPhotoIndex + 1) % currentFilteredPhotos.length,
-                   (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length];
+  const indexes = [currentPhotoIndex + 1, currentPhotoIndex - 1]
+    .filter(index => index >= 0 && index < currentFilteredPhotos.length);
   indexes.forEach(index => {
     const url = currentFilteredPhotos[index]?.image_url;
     if (url) { const image = new Image(); image.decoding = 'async'; image.src = url; }
   });
 }
 
+function notifyImageSequenceComplete() {
+  const kind = activePhotoTypeTab === 'thermal' ? 'Thermal' : 'RGB';
+  const hasThermalToReview = activePhotoTypeTab === 'rgb' &&
+    currentTowerPhotos.some(photo => isThermalPhoto(photo));
+  const nextStep = hasThermalToReview
+    ? ' Switch to Thermal to continue.'
+    : ' The image review sequence is complete.';
+  showToast(`End of ${kind} images — all ${currentFilteredPhotos.length} image${currentFilteredPhotos.length === 1 ? '' : 's'} reached.${nextStep}`, 'success');
+}
+
 function lightboxNext() {
-  currentPhotoIndex = (currentPhotoIndex + 1) % currentFilteredPhotos.length;
+  if (!currentFilteredPhotos.length) return;
+  if (currentPhotoIndex >= currentFilteredPhotos.length - 1) {
+    notifyImageSequenceComplete();
+    return;
+  }
+  currentPhotoIndex += 1;
   renderLightboxImage();
   prefetchAdjacentPhotos();
+  if (currentPhotoIndex === currentFilteredPhotos.length - 1) notifyImageSequenceComplete();
 }
 
 function lightboxPrev() {
-  currentPhotoIndex = (currentPhotoIndex - 1 + currentFilteredPhotos.length) % currentFilteredPhotos.length;
+  if (!currentFilteredPhotos.length || currentPhotoIndex <= 0) return;
+  currentPhotoIndex -= 1;
   renderLightboxImage();
   prefetchAdjacentPhotos();
 }

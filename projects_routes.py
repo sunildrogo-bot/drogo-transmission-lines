@@ -96,6 +96,47 @@ def _cleanup_deleted_files(stored_paths, entity_label):
     return cleanup
 
 
+def _find_existing_photo_by_hash(model, line_id, content_hash, incoming_filename):
+    """Find an exact line-level duplicate, including same-name legacy rows.
+
+    Photos uploaded before content hashing have a null digest. During a new
+    upload we lazily hash only plausible same-filename candidates, avoiding a
+    full multi-gigabyte scan in the request while still stopping the common
+    "upload the same folder again" case. The complete legacy backfill remains
+    available in Settings → Uploads & Storage → Duplicate images.
+    """
+    from duplicate_photos import hash_stored_photo, stored_photo_exists
+    existing = model.query.filter_by(line_id=line_id, content_hash=content_hash).all()
+    for row in existing:
+        if stored_photo_exists(row):
+            return row
+    safe_name = secure_filename(incoming_filename or '')
+    root, extension = os.path.splitext(safe_name)
+    if not root or not extension:
+        return None
+    collision_name = re.compile(
+        rf'^{re.escape(root)}(?:_\d+)?{re.escape(extension)}$', re.IGNORECASE)
+    legacy_rows = (model.query
+                   .filter(model.line_id == line_id,
+                           db.or_(model.content_hash.is_(None), model.content_hash == ''))
+                   .order_by(model.id.asc()).all())
+    changed = False
+    for row in legacy_rows:
+        if not collision_name.match(os.path.basename(row.image_path or '')):
+            continue
+        digest = hash_stored_photo(row)
+        if not digest:
+            continue
+        row.content_hash = digest
+        changed = True
+        if digest == content_hash:
+            db.session.commit()
+            return row
+    if changed:
+        db.session.commit()
+    return None
+
+
 def _admin_or_client_guard():
     """For actions Client sessions get a real write ability for, unlike
     everything else in this module — right now just closing a defect
@@ -2049,8 +2090,15 @@ def api_upload_tower_photo(line_id):
     image_file.stream.seek(0)
     content_hash = hashlib.sha256(image_file.read()).hexdigest()
     image_file.stream.seek(0)
-    if TowerPhoto.query.filter_by(line_id=line_id, tower_label=tower_label, content_hash=content_hash).first():
-        return jsonify({'error': f'"{image_file.filename}" is already uploaded for this tower — skipped as a duplicate.'}), 400
+    duplicate = _find_existing_photo_by_hash(
+        TowerPhoto, line_id, content_hash, image_file.filename)
+    if duplicate:
+        return jsonify({
+            'error': (f'"{image_file.filename}" is already uploaded on this line '
+                      f'(Tower {duplicate.tower_label}) — skipped as an exact duplicate.'),
+            'duplicate_photo_id': duplicate.id,
+            'duplicate_tower': duplicate.tower_label,
+        }), 400
 
     # GPS proximity check: an uploaded photo should actually have been
     # taken at this tower, not some other one. Read the tower's own
@@ -2948,6 +2996,19 @@ def api_pilot_capture_photo(line_id):
     if not image_file or not image_file.filename:
         return jsonify({'error': 'An image file is required.'}), 400
 
+    image_file.stream.seek(0)
+    content_hash = hashlib.sha256(image_file.read()).hexdigest()
+    image_file.stream.seek(0)
+    duplicate = _find_existing_photo_by_hash(
+        TowerPhoto, line_id, content_hash, image_file.filename)
+    if duplicate:
+        return jsonify({
+            'error': (f'This image is already stored on the line at Tower '
+                      f'{duplicate.tower_label} — duplicate capture was not saved.'),
+            'duplicate_photo_id': duplicate.id,
+            'duplicate_tower': duplicate.tower_label,
+        }), 400
+
     tower_coords = _kml_tower_coordinates(line, tower_label)
     if tower_coords is None:
         return jsonify({'error': 'Tower was not found in this line\'s KML.'}), 400
@@ -2979,6 +3040,7 @@ def api_pilot_capture_photo(line_id):
         line_id=line_id, tower_label=tower_label, image_path=saved, thumbnail_path=thumb,
         uploaded_by=session.get('user_name', ''),
         gps_lat=capture_lat, gps_lng=capture_lng,
+        content_hash=content_hash,
     )
     db.session.add(photo)
     ActivityLog.log(action='capture_photo', entity_type='TowerPhoto',
@@ -3045,7 +3107,12 @@ def api_upload_corridor_photo(line_id):
     image_file.stream.seek(0)
     content_hash = hashlib.sha256(image_file.read()).hexdigest()
     image_file.stream.seek(0)
-    if CorridorPhoto.query.filter_by(line_id=line_id, content_hash=content_hash).first():
+    from duplicate_photos import stored_photo_exists
+    duplicate = next((row for row in CorridorPhoto.query.filter_by(line_id=line_id, content_hash=content_hash).all()
+                      if stored_photo_exists(row)), None)
+    duplicate = duplicate or _find_existing_photo_by_hash(
+        CorridorPhoto, line_id, content_hash, image_file.filename)
+    if duplicate:
         return jsonify({'error': f'"{image_file.filename}" is already uploaded for this line — skipped as a duplicate.'}), 400
 
     # No tower/distance check here (that's the whole point of a corridor

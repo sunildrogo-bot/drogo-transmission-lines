@@ -227,6 +227,62 @@ def api_background_job(job_id):
     return jsonify(BackgroundJob.query.get_or_404(job_id).to_dict())
 
 
+@settings_bp.route('/api/settings/duplicate-photos', methods=['GET'])
+def api_duplicate_photos_status():
+    """Latest exact-duplicate scan/cleanup state for Uploads & Storage."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    jobs = (BackgroundJob.query
+            .filter(BackgroundJob.job_type.in_(('duplicate_photo_scan', 'duplicate_photo_cleanup')))
+            .order_by(BackgroundJob.id.desc()).limit(10).all())
+    return jsonify({'jobs': [job.to_dict() for job in jobs]})
+
+
+@settings_bp.route('/api/settings/duplicate-photos/scan', methods=['POST'])
+def api_scan_duplicate_photos():
+    """Queue a full SHA-256 scan without deleting any record or file."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    active = (BackgroundJob.query
+              .filter(BackgroundJob.job_type.in_(('duplicate_photo_scan', 'duplicate_photo_cleanup')),
+                      BackgroundJob.status.in_(['Queued', 'Processing'])).first())
+    if active:
+        return jsonify(active.to_dict()), 200
+    from background_jobs import enqueue
+    job = enqueue('duplicate_photo_scan', {}, session.get('user_id'), session.get('user_name', 'Admin'))
+    return jsonify(job.to_dict()), 202
+
+
+@settings_bp.route('/api/settings/duplicate-photos/cleanup', methods=['POST'])
+def api_cleanup_duplicate_photos():
+    """Queue conservative cleanup after password and completed-scan checks."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(force=True, silent=True) or {}
+    if not app_settings.verify_delete_password((payload.get('password') or '').strip()):
+        return jsonify({'error': 'Incorrect delete password.'}), 403
+    active = (BackgroundJob.query
+              .filter(BackgroundJob.job_type.in_(('duplicate_photo_scan', 'duplicate_photo_cleanup')),
+                      BackgroundJob.status.in_(['Queued', 'Processing'])).first())
+    if active:
+        return jsonify({'error': 'A duplicate-image task is already running.', 'job': active.to_dict()}), 409
+    latest_scan = (BackgroundJob.query.filter_by(job_type='duplicate_photo_scan', status='Completed')
+                   .order_by(BackgroundJob.id.desc()).first())
+    latest_cleanup = (BackgroundJob.query.filter_by(job_type='duplicate_photo_cleanup', status='Completed')
+                      .order_by(BackgroundJob.id.desc()).first())
+    if latest_scan and latest_cleanup and latest_cleanup.id > latest_scan.id:
+        return jsonify({'error': 'Run a new duplicate scan before another cleanup.'}), 409
+    if not latest_scan or not latest_scan.to_dict()['result'].get('safe_to_remove'):
+        return jsonify({'error': 'Run a duplicate scan first. No safe redundant copies are currently confirmed.'}), 409
+    from background_jobs import enqueue
+    job = enqueue('duplicate_photo_cleanup', {'scan_job_id': latest_scan.id},
+                  session.get('user_id'), session.get('user_name', 'Admin'))
+    return jsonify(job.to_dict()), 202
+
+
 @settings_bp.route('/api/settings/media-metadata-repair', methods=['GET', 'POST'])
 def api_media_metadata_repair():
     guard = _require_admin()

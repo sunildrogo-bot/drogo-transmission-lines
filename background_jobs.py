@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from flask import current_app
 from PIL import Image, ImageOps
 
-from models import BackgroundJob, TowerPhoto, db
+from models import ActivityLog, BackgroundJob, TowerPhoto, db
 
 
 def enqueue(job_type, payload=None, user_id=None, user_name=''):
@@ -253,12 +253,73 @@ def _run_storage_migration(job):
                                   'failures': failures})
 
 
+def _run_duplicate_photo_scan(job):
+    """Backfill legacy hashes and report exact duplicate tower photos."""
+    from duplicate_photos import backfill_missing_hashes
+    result = backfill_missing_hashes(job)
+    job.result_json = json.dumps(result)
+
+
+def _run_duplicate_photo_cleanup(job):
+    """Delete only duplicate rows that have been revalidated as safe."""
+    from duplicate_photos import analyse_duplicate_photos, photo_stored_paths
+    from storage_cleanup import delete_stored_files
+
+    photos = TowerPhoto.query.order_by(TowerPhoto.id).all()
+    analysis = analyse_duplicate_photos(photos)
+    delete_ids = {
+        photo_id
+        for group in analysis['safe_groups']
+        for photo_id in group['delete_photo_ids']
+    }
+    delete_rows = [photo for photo in photos if photo.id in delete_ids]
+    keep_rows = [photo for photo in photos if photo.id not in delete_ids]
+    # A damaged legacy database can contain two rows pointing at one stored
+    # path. Never remove a file still referenced by the canonical keeper.
+    retained_paths = set()
+    for photo in keep_rows:
+        retained_paths.update(photo_stored_paths(photo))
+    removable_paths = set()
+    for photo in delete_rows:
+        removable_paths.update(photo_stored_paths(photo))
+    removable_paths.difference_update(retained_paths)
+
+    job.progress_total = len(delete_rows)
+    db.session.commit()
+    for index, photo in enumerate(delete_rows, 1):
+        db.session.delete(photo)
+        job.progress_current = index
+        job.heartbeat_at = datetime.utcnow()
+        if index % 25 == 0:
+            db.session.commit()
+    ActivityLog.log(
+        action='delete_duplicates', entity_type='TowerPhoto',
+        entity_name='Duplicate image cleanup', module='TRANS',
+        performed_by=job.created_by_name or 'Admin', role='Admin',
+        details=f'Removed {len(delete_rows)} exact duplicate photo record(s); protected evidence was retained.',
+    )
+    db.session.commit()
+    cleanup = delete_stored_files(removable_paths)
+    remaining = analyse_duplicate_photos(TowerPhoto.query.order_by(TowerPhoto.id).all())
+    job.result_json = json.dumps({
+        'deleted_photos': len(delete_rows),
+        'deleted_files': cleanup['removed'],
+        'missing_files': cleanup['missing'],
+        'cleanup_errors': cleanup['errors'][:50],
+        'remaining_duplicate_groups': remaining['duplicate_groups'],
+        'remaining_protected_groups': len(remaining['protected_groups']),
+        'remaining_tower_conflicts': len(remaining['tower_conflicts']),
+    })
+
+
 HANDLERS = {
     'thumbnail_repair': _run_thumbnail_repair,
     'application_backup': _run_application_backup,
     'training_export': _run_training_export,
     'media_metadata_repair': _run_media_metadata_repair,
     'storage_migration': _run_storage_migration,
+    'duplicate_photo_scan': _run_duplicate_photo_scan,
+    'duplicate_photo_cleanup': _run_duplicate_photo_cleanup,
 }
 
 

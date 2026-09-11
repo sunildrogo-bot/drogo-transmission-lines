@@ -40,7 +40,7 @@ class Updates18And20To24ContractTests(unittest.TestCase):
     def test_release_registry_includes_every_approved_update(self):
         from feature_registry import source_compatibility
         report = source_compatibility(ROOT)
-        self.assertEqual(report['version'], '1.27.0')
+        self.assertEqual(report['version'], '1.28.0')
         self.assertTrue(report['compatible'])
         self.assertEqual(report['missing'], 0)
 
