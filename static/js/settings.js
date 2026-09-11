@@ -95,6 +95,69 @@ function duplicateStat(label, value, note) {
   return `<div class="backup-health-stat"><div class="backup-health-label">${escapeHtml(label)}</div><div class="backup-health-value">${Number(value || 0).toLocaleString()}</div><div class="backup-health-note">${escapeHtml(note)}</div></div>`;
 }
 
+function formatDuplicateDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'Calculating…';
+  const rounded = Math.max(0, Math.round(seconds));
+  if (rounded < 60) return `${rounded}s`;
+  if (rounded < 3600) return `${Math.floor(rounded / 60)}m ${rounded % 60}s`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  return `${hours}h ${minutes}m`;
+}
+
+function duplicateProgressView(job) {
+  const total = Number(job.progress_total || 0);
+  const rawCurrent = Number(job.progress_current || 0);
+  const current = Math.min(rawCurrent, total || rawCurrent);
+  const queued = job.status === 'Queued';
+  const percentage = total ? Math.min(100, Math.max(0, (current / total) * 100)) : 0;
+  const startedAt = Date.parse(job.started_at || job.created_at || '');
+  const elapsedSeconds = Number.isFinite(startedAt) ? Math.max(0, (Date.now() - startedAt) / 1000) : NaN;
+  const rate = current > 0 && elapsedSeconds > 0 ? current / elapsedSeconds : 0;
+  const remaining = total ? Math.max(0, total - current) : null;
+  const etaSeconds = rate > 0 && remaining !== null ? remaining / rate : NaN;
+  const heartbeatAt = Date.parse(job.heartbeat_at || '');
+  const heartbeatAge = Number.isFinite(heartbeatAt) ? Math.max(0, (Date.now() - heartbeatAt) / 1000) : NaN;
+  const stalled = !queued && Number.isFinite(heartbeatAge) && heartbeatAge > 90;
+  const operation = job.job_type === 'duplicate_photo_cleanup' ? 'Safe duplicate cleanup' : 'Exact duplicate scan';
+  const defaultPhase = queued
+    ? 'Waiting for background worker'
+    : (total ? 'Processing stored images' : 'Preparing image inventory');
+  const phase = job.result?.phase || defaultPhase;
+  const perMinute = rate * 60;
+  const rateLabel = rate > 0 ? `${perMinute.toFixed(perMinute >= 10 ? 0 : 1)} images/min` : 'Calculating speed…';
+  const heartbeatLabel = queued
+    ? 'Waiting for worker'
+    : (!Number.isFinite(heartbeatAge) ? 'Worker starting…'
+      : (stalled ? `No update for ${formatDuplicateDuration(heartbeatAge)}` : `Worker active · updated ${formatDuplicateDuration(heartbeatAge)} ago`));
+  const progressClass = total ? '' : ' preparing';
+  const remainingLabel = remaining === null ? '—' : remaining.toLocaleString();
+  const etaLabel = queued ? 'Waiting' : (remaining === 0 && total ? 'Finishing…' : formatDuplicateDuration(etaSeconds));
+
+  return {
+    stalled,
+    html: `<div class="duplicate-progress-panel">
+      <div class="duplicate-progress-head">
+        <div><div class="duplicate-progress-kicker">${escapeHtml(operation)} · ${escapeHtml(job.status)}</div><div class="duplicate-progress-title">${escapeHtml(phase)}</div></div>
+        <div class="duplicate-progress-percent">${percentage.toFixed(1)}%</div>
+      </div>
+      <div class="duplicate-progress-track" role="progressbar" aria-label="${escapeHtml(operation)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage.toFixed(1)}"><span class="duplicate-progress-fill${progressClass}" style="width:${percentage.toFixed(2)}%"></span></div>
+      <div class="duplicate-progress-metrics">
+        <div class="duplicate-progress-metric"><span>Completed</span><strong>${current.toLocaleString()}</strong></div>
+        <div class="duplicate-progress-metric"><span>Total images</span><strong>${total ? total.toLocaleString() : 'Preparing…'}</strong></div>
+        <div class="duplicate-progress-metric"><span>Remaining</span><strong>${remainingLabel}</strong></div>
+        <div class="duplicate-progress-metric"><span>Estimated wait</span><strong>${etaLabel}</strong></div>
+      </div>
+      <div class="duplicate-progress-foot"><span>Elapsed ${formatDuplicateDuration(elapsedSeconds)} · ${rateLabel}</span><span class="${stalled ? 'stalled' : 'active'}">${escapeHtml(heartbeatLabel)}</span></div>
+    </div>`,
+    message: queued
+      ? 'The task is queued. Start or verify the background worker to begin scanning.'
+      : (stalled
+        ? 'The scan has stopped reporting progress. Check the background worker before waiting longer.'
+        : `${operation} is running. This display refreshes automatically every two seconds.`),
+  };
+}
+
 async function loadDuplicatePhotos() {
   const summary = document.getElementById('duplicate-photo-summary');
   const details = document.getElementById('duplicate-photo-details');
@@ -114,13 +177,11 @@ async function loadDuplicatePhotos() {
     cleanupButton.disabled = true;
 
     if (active) {
-      const total = Number(active.progress_total || 0);
-      const current = Number(active.progress_current || 0);
-      const label = active.job_type === 'duplicate_photo_cleanup' ? 'Removing safe copies' : 'Scanning stored originals';
-      summary.innerHTML = duplicateStat('Progress', current, total ? `${current} of ${total} photos` : 'Preparing scan');
+      const progress = duplicateProgressView(active);
+      summary.innerHTML = progress.html;
       details.innerHTML = '';
-      status.className = 'backup-message';
-      status.textContent = `${label}… Keep the background worker running.`;
+      status.className = progress.stalled ? 'backup-message warn' : 'backup-message';
+      status.textContent = progress.message;
       duplicatePhotoPollTimer = setTimeout(loadDuplicatePhotos, 2000);
       return;
     }

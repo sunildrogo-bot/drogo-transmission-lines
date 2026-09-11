@@ -1,7 +1,7 @@
 """Required-feature registry used by Settings and the safe release builder."""
 from pathlib import Path
 
-APPLICATION_VERSION = '1.28.0'
+APPLICATION_VERSION = '1.29.0'
 
 FEATURES = (
     ('admin_dashboard', 'Admin Dashboard', 'templates/admin.html', 'api/dashboard/summary'),
@@ -38,6 +38,7 @@ FEATURES = (
     ('duplicate_image_control', 'Duplicate image scan, cleanup and upload prevention', 'duplicate_photos.py', 'analyse_duplicate_photos'),
     ('review_end_notification', 'End-of-image review notification', 'templates/project_map.html', 'notifyImageSequenceComplete'),
     ('inspection_autofill_control', 'Inspection fields ignore credential autofill', 'templates/project_map.html', 'name="inspection_component"'),
+    ('duplicate_scan_progress', 'Live duplicate-scan percentage, counts and ETA', 'static/js/settings.js', 'duplicateProgressView'),
 )
 
 

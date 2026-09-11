@@ -9,13 +9,35 @@ more than one evidence-bearing copy are left for manual review.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import defaultdict
+from datetime import datetime
 
 from models import Line, TowerPhoto, db
 from storage_service import get_storage, normalize_key
 
 
 HASH_CHUNK_SIZE = 1024 * 1024
+
+
+def _publish_scan_progress(job, phase, current, total, hashed=0, missing=0,
+                           failed=0, commit=False):
+    """Publish useful live scan state without adding a database column."""
+    if job is None:
+        return
+    job.progress_current = current
+    job.progress_total = total
+    job.heartbeat_at = datetime.utcnow()
+    job.result_json = json.dumps({
+        'phase': phase,
+        'photos_scanned': current,
+        'photos_total': total,
+        'hashes_added': hashed,
+        'missing_files': missing,
+        'hash_failures': failed,
+    })
+    if commit:
+        db.session.commit()
 
 
 def hash_stored_photo(photo):
@@ -159,10 +181,10 @@ def analyse_duplicate_photos(photos):
 
 def backfill_missing_hashes(job=None):
     """Hash legacy photo rows and return a complete conservative scan result."""
+    _publish_scan_progress(job, 'Preparing image inventory', 0, 0, commit=True)
     photos = TowerPhoto.query.order_by(TowerPhoto.id).all()
-    if job is not None:
-        job.progress_total = len(photos)
-        db.session.commit()
+    total = len(photos)
+    _publish_scan_progress(job, 'Fingerprinting stored originals', 0, total, commit=True)
 
     hashed = missing = failed = 0
     for index, photo in enumerate(photos, 1):
@@ -174,11 +196,11 @@ def backfill_missing_hashes(job=None):
                 hashed += 1
             else:
                 missing += 1
-        if job is not None:
-            job.progress_current = index
-            from datetime import datetime
-            job.heartbeat_at = datetime.utcnow()
-        if index % 10 == 0:
+        _publish_scan_progress(
+            job, 'Fingerprinting stored originals', index, total,
+            hashed=hashed, missing=missing, failed=failed,
+        )
+        if index % 5 == 0:
             try:
                 db.session.commit()
             except Exception:
@@ -186,9 +208,15 @@ def backfill_missing_hashes(job=None):
                 failed += 1
     db.session.commit()
 
+    _publish_scan_progress(
+        job, 'Analysing exact duplicate groups', total, total,
+        hashed=hashed, missing=missing, failed=failed, commit=True,
+    )
     result = analyse_duplicate_photos(photos)
     result.update({
+        'phase': 'Completed',
         'photos_scanned': len(photos),
+        'photos_total': len(photos),
         'hashes_added': hashed,
         'missing_files': missing,
         'hash_failures': failed,

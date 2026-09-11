@@ -1280,6 +1280,7 @@ class BackgroundJob(db.Model):
             'created_at': self.created_at.isoformat() + 'Z' if self.created_at else '',
             'started_at': self.started_at.isoformat() + 'Z' if self.started_at else '',
             'finished_at': self.finished_at.isoformat() + 'Z' if self.finished_at else '',
+            'heartbeat_at': self.heartbeat_at.isoformat() + 'Z' if self.heartbeat_at else '',
         }
 
 

@@ -265,6 +265,9 @@ def _run_duplicate_photo_cleanup(job):
     from duplicate_photos import analyse_duplicate_photos, photo_stored_paths
     from storage_cleanup import delete_stored_files
 
+    job.result_json = json.dumps({'phase': 'Classifying safe duplicate copies'})
+    job.heartbeat_at = datetime.utcnow()
+    db.session.commit()
     photos = TowerPhoto.query.order_by(TowerPhoto.id).all()
     analysis = analyse_duplicate_photos(photos)
     delete_ids = {
@@ -285,11 +288,21 @@ def _run_duplicate_photo_cleanup(job):
     removable_paths.difference_update(retained_paths)
 
     job.progress_total = len(delete_rows)
+    job.result_json = json.dumps({
+        'phase': 'Removing safe redundant records',
+        'records_total': len(delete_rows),
+        'records_removed': 0,
+    })
     db.session.commit()
     for index, photo in enumerate(delete_rows, 1):
         db.session.delete(photo)
         job.progress_current = index
         job.heartbeat_at = datetime.utcnow()
+        job.result_json = json.dumps({
+            'phase': 'Removing safe redundant records',
+            'records_total': len(delete_rows),
+            'records_removed': index,
+        })
         if index % 25 == 0:
             db.session.commit()
     ActivityLog.log(
@@ -298,6 +311,13 @@ def _run_duplicate_photo_cleanup(job):
         performed_by=job.created_by_name or 'Admin', role='Admin',
         details=f'Removed {len(delete_rows)} exact duplicate photo record(s); protected evidence was retained.',
     )
+    db.session.commit()
+    job.result_json = json.dumps({
+        'phase': 'Deleting unreferenced stored files',
+        'records_total': len(delete_rows),
+        'records_removed': len(delete_rows),
+    })
+    job.heartbeat_at = datetime.utcnow()
     db.session.commit()
     cleanup = delete_stored_files(removable_paths)
     remaining = analyse_duplicate_photos(TowerPhoto.query.order_by(TowerPhoto.id).all())
