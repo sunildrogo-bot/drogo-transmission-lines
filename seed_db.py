@@ -1,7 +1,8 @@
 """
 seed_db.py — Creates all tables and seeds the database with demo users.
 
-Run once after setting up the project:
+Run once after applying migrations:
+    flask --app app db upgrade
     python seed_db.py
 
 Safe to re-run: existing users are skipped (matched by email).
@@ -69,10 +70,6 @@ def seed():
     os.makedirs('instance', exist_ok=True)
 
     with app.app_context():
-        # ── Create all tables ─────────────────────────────────────────────────
-        db.create_all()
-        print("✓ Tables created (or already exist)")
-
         # ── Seed lookup tables ────────────────────────────────────────────────
         for r in ROLES:
             _get_or_create_role(r)
