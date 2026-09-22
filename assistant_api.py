@@ -27,7 +27,8 @@ import json
 from datetime import datetime
 from flask import Blueprint, request, jsonify, session
 
-from models import db, Project, Division, Line, TowerPhoto, TowerDefect, TowerReport, User, HelpTicket
+from models import db, Project, TowerPhoto, TowerDefect, TowerReport, User, HelpTicket, TowerInspectionStatus
+from access_control import can_access_division, can_access_line, client_can_access_tower
 
 assistant_bp = Blueprint('assistant_bp', __name__, url_prefix='/api/assistant')
 
@@ -107,8 +108,15 @@ def tool_list_divisions(project_name):
     project, err = _find_project(project_name)
     if err:
         return err
-    return {'divisions': [{'id': d.id, 'name': d.name, 'state': d.state, 'lines': len(d.lines)}
-                           for d in project.divisions]}
+    return {'divisions': [
+        {
+            'id': d.id,
+            'name': d.name,
+            'state': d.state,
+            'lines': sum(1 for line in d.lines if can_access_line(line)),
+        }
+        for d in project.divisions if can_access_division(d)
+    ]}
 
 
 def tool_list_lines(project_name, division_name=None):
@@ -123,6 +131,8 @@ def tool_list_lines(project_name, division_name=None):
     out = []
     for d in divisions:
         for l in d.lines:
+            if not can_access_line(l):
+                continue
             out.append({'id': l.id, 'name': l.name, 'division': d.name, 'tower_count': l.tower_count,
                         'voltage_level': l.voltage_level, 'pilot_name': l.pilot_name})
     return {'lines': out}
@@ -132,7 +142,10 @@ def _find_line(project_name, line_name):
     project, err = _find_project(project_name)
     if err:
         return None, err
-    matches = [l for d in project.divisions for l in d.lines if line_name.lower() in l.name.lower()]
+    matches = [
+        l for d in project.divisions for l in d.lines
+        if can_access_line(l) and line_name.lower() in l.name.lower()
+    ]
     if not matches:
         return None, {'error': f'No line found matching "{line_name}" in project "{project.name}".'}
     if len(matches) > 1:
@@ -145,14 +158,19 @@ def tool_list_tower_defects(project_name, line_name, tower_label):
     line, err = _find_line(project_name, line_name)
     if err:
         return err
+    if not client_can_access_tower(line.id, str(tower_label)):
+        return {'error': 'Inspection results for this tower have not been released yet.'}
     photos = TowerPhoto.query.filter_by(line_id=line.id, tower_label=str(tower_label)).all()
     photo_ids = [p.id for p in photos]
     if not photo_ids:
         return {'defects': [], 'note': 'No photos uploaded for this tower yet.'}
-    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all()
+    defects = (TowerDefect.query
+               .filter(TowerDefect.tower_photo_id.in_(photo_ids),
+                       TowerDefect.deleted_at.is_(None)).all())
     return {'defects': [{
         'id': d.id, 'component_name': d.component_name, 'defect_type': d.defect_type,
-        'location': d.location, 'severity': d.severity, 'status': d.status,
+        'location': d.location, 'severity': d.severity,
+        'status': d.resolution_status or 'Open', 'component_status': d.status or 'OK',
         'observation': d.observation, 'created_at': d.created_at.strftime('%d %b %Y') if d.created_at else '',
     } for d in defects]}
 
@@ -161,21 +179,35 @@ def tool_search_defects(project_name, severity=None, status=None, component_name
     project, err = _find_project(project_name)
     if err:
         return err
-    line_ids = [l.id for d in project.divisions for l in d.lines]
+    line_ids = [l.id for d in project.divisions for l in d.lines if can_access_line(l)]
     if not line_ids:
         return {'defects': []}
     q = (TowerDefect.query.join(TowerPhoto, TowerDefect.tower_photo_id == TowerPhoto.id)
-         .filter(TowerPhoto.line_id.in_(line_ids)))
+         .filter(TowerPhoto.line_id.in_(line_ids), TowerDefect.deleted_at.is_(None)))
     if severity:
         q = q.filter(TowerDefect.severity == severity)
     if status:
-        q = q.filter(TowerDefect.status == status)
+        q = q.filter(TowerDefect.resolution_status == status)
     if component_name:
         q = q.filter(TowerDefect.component_name.ilike(f'%{component_name}%'))
-    defects = q.order_by(TowerDefect.created_at.desc()).limit(50).all()
+    defects = q.order_by(TowerDefect.created_at.desc()).limit(200).all()
+    if session.get('role') == 'Client User':
+        released_keys = {
+            (row.line_id, row.tower_label)
+            for row in TowerInspectionStatus.query.filter(
+                TowerInspectionStatus.line_id.in_(line_ids),
+                TowerInspectionStatus.inspection_done.is_(True),
+            ).all()
+        }
+        defects = [
+            defect for defect in defects
+            if defect.photo and (defect.photo.line_id, defect.photo.tower_label) in released_keys
+        ]
+    defects = defects[:50]
     return {'defects': [{
         'id': d.id, 'tower': d.photo.tower_label if d.photo else '?', 'component_name': d.component_name,
-        'defect_type': d.defect_type, 'severity': d.severity, 'status': d.status,
+        'defect_type': d.defect_type, 'severity': d.severity,
+        'status': d.resolution_status or 'Open', 'component_status': d.status or 'OK',
         'observation': d.observation,
     } for d in defects], 'note': 'Capped at 50 most recent matches.'}
 
@@ -197,16 +229,18 @@ def tool_generate_tower_report(project_name, line_name, tower_label):
     # a Flask request object this tool doesn't have — same underlying report
     # builder and storage logic either way.
     from flask import current_app
-    import projects_routes as pr
     photos = TowerPhoto.query.filter_by(line_id=line.id, tower_label=str(tower_label)).all()
     photo_ids = [p.id for p in photos]
-    defects = TowerDefect.query.filter(TowerDefect.tower_photo_id.in_(photo_ids)).all() if photo_ids else []
+    defects = (TowerDefect.query
+               .filter(TowerDefect.tower_photo_id.in_(photo_ids),
+                       TowerDefect.deleted_at.is_(None)).all()) if photo_ids else []
     photo_by_id = {p.id: p for p in photos}
     defect_dicts = []
     for d in defects:
         photo = photo_by_id.get(d.tower_photo_id)
         entry = d.to_dict()
-        entry['image_path'] = photo.image_path if photo else ''
+        from projects_routes import _storage_working_path
+        entry['image_path'] = _storage_working_path(photo.display_image_path()) if photo else ''
         defect_dicts.append(entry)
     info = {
         'line_name': line.name, 'tower_id': str(tower_label), 'voltage_level': line.voltage_level or '',
@@ -215,9 +249,9 @@ def tool_generate_tower_report(project_name, line_name, tower_label):
         'report_date': datetime.utcnow().strftime('%d %b %Y'),
     }
     from tower_report import build_tower_report_pdf
-    static_root = os.path.join(current_app.root_path, 'static')
+    static_root = os.path.realpath(current_app.static_folder)
     pdf_buf = build_tower_report_pdf(info, defect_dicts, static_root)
-    folder_fs = os.path.join(current_app.root_path, pr.UPLOAD_BASE, 'tower_reports')
+    folder_fs = os.path.join(static_root, 'uploads', 'tower_reports')
     os.makedirs(folder_fs, exist_ok=True)
     from werkzeug.utils import secure_filename
     safe_tower = secure_filename(str(tower_label)) or 'tower'
@@ -226,6 +260,8 @@ def tool_generate_tower_report(project_name, line_name, tower_label):
     with open(full_path, 'wb') as f:
         f.write(pdf_buf.getvalue())
     report_path = f'uploads/tower_reports/{filename}'
+    from storage_service import get_storage
+    get_storage().publish(report_path, full_path)
     existing = TowerReport.query.filter_by(line_id=line.id, tower_label=str(tower_label)).first()
     if existing:
         existing.report_path = report_path
@@ -275,6 +311,9 @@ def tool_generate_central_report():
     across every module — gathers the same per-project summary shape
     already used elsewhere (via _build_project_defect_summary) and hands
     them to central_report.py."""
+    if not _is_admin():
+        return {'error': 'Only Admin accounts can generate central reports.'}
+
     out = []
 
     for module_name in ('Transmission Line', 'TRANS'):
@@ -297,17 +336,21 @@ def tool_generate_central_report():
 
     from central_report import build_central_report_pdf
     from flask import current_app
-    static_root = os.path.join(current_app.root_path, 'static')
+    static_root = os.path.realpath(current_app.static_folder)
     pdf_buf = build_central_report_pdf(out, static_root)
 
-    folder_fs = os.path.join(current_app.root_path, 'static', 'uploads', 'central_reports')
+    folder_fs = os.path.join(static_root, 'uploads', 'central_reports')
     os.makedirs(folder_fs, exist_ok=True)
     filename = f"central_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     full_path = os.path.join(folder_fs, filename)
     with open(full_path, 'wb') as f:
         f.write(pdf_buf.getvalue())
 
-    return {'ok': True, 'download_url': f'/static/uploads/central_reports/{filename}',
+    from storage_service import get_storage, stored_url
+    report_key = f'uploads/central_reports/{filename}'
+    get_storage().publish(report_key, full_path)
+
+    return {'ok': True, 'download_url': stored_url(report_key),
             'project_count': len(out), 'total_defects': sum(p['total_defects'] for p in out)}
 
 
@@ -321,12 +364,15 @@ def tool_create_help_ticket(subject, description=''):
     subject = (subject or '').strip()
     if not subject:
         return {'error': 'A short subject describing the problem is required.'}
-    reporter_type = 'Admin' if _is_admin() else 'Client'
+    reporter_type = {'Admin': 'Admin', 'SME': 'SME', 'Pilot': 'Pilot'}.get(
+        session.get('role'), 'Client'
+    )
     ticket = HelpTicket(
         subject=subject,
         description=(description or '').strip(),
         reporter_type=reporter_type,
         submitted_by=session.get('user_name', ''),
+        submitted_by_user_id=session.get('user_id'),
         status='Open',
         seen_by_reporter=True,
     )
@@ -385,7 +431,7 @@ def chat():
     if guard:
         return guard
 
-    api_key = os.environ.get('GEMINI_API_KEY')
+    api_key = os.environ.get('GEMINI_API_KEY_OVERRIDE') or os.environ.get('GEMINI_API_KEY')
     if not api_key:
         return jsonify({'error': 'The assistant is not configured yet — GEMINI_API_KEY is not set on the server.'}), 503
 
@@ -445,3 +491,10 @@ def chat():
                          'history': [c.model_dump(mode='json') for c in contents]})
     except Exception as e:
         return jsonify({'error': f'Assistant error: {e}'}), 500
+    finally:
+        # One request owns one Gemini client.  Close it only after every tool
+        # round and response has finished, including early successful returns.
+        try:
+            client.close()
+        except Exception:
+            pass

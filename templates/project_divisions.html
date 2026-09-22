@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Divisions{% endblock %}
+
+{% block head %}
+<style>
+  .dv-page{min-height:100vh;display:flex;flex-direction:column;background:var(--bg-base);}
+
+  /* Edge-to-edge cover banner — same treatment as the Projects page */
+  .cover-banner{
+    position:relative;width:100%;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 28px;flex-wrap:wrap;
+    background:linear-gradient(180deg,rgba(244,245,247,.80) 0%,rgba(98,98,100,.92) 100%), center 40%/cover no-repeat;
+  }
+  .banner-text{display:flex;flex-direction:column;justify-content:center;}
+  .banner-title{font-size:11px;letter-spacing:.28em;color:var(--accent-sky);text-transform:uppercase;margin-bottom:4px;font-weight:600;}
+  .banner-heading{font-size:22px;font-weight:800;color:#fff;}
+  .banner-sub{font-size:12.5px;color:rgba(255,255,255,.78);margin-top:4px;}
+  .banner-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+  .btn-add-division{background:rgba(12,0,0,.12);border:1px solid rgba(8,0,0,.35);color:#fff;padding:8px 16px;border-radius:var(--radius-md,6px);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s;}
+  .btn-add-division:hover{background:rgba(255,255,255,.2);border-color:rgba(6,0,0,.55);}
+
+  .dv-area{padding:28px;background:var(--bg-base);flex:1;}
+  .section-label{font-size:11px;letter-spacing:.28em;color:var(--text-muted);text-transform:uppercase;margin-bottom:16px;font-weight:600;}
+
+  .dv-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}
+  @media (max-width:1024px){ .dv-grid{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width:640px){ .dv-grid{grid-template-columns:1fr;} }
+
+  /* Division cards — identical look to the project cards */
+  .division-card{position:relative;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;cursor:pointer;transition:border-color .15s,transform .15s;text-decoration:none;display:block;box-shadow:0 1px 3px rgba(27,30,36,.05);}
+  .division-card:hover{border-color:var(--accent);transform:translateY(-2px);}
+  .card-banner{position:relative;height:120px;background-size:cover;background-position:center;}
+  .card-banner::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(6,11,22,.1) 0%,rgba(6,11,22,.85) 100%);}
+  .card-tag{position:absolute;top:12px;left:12px;z-index:5;background:rgba(6,11,22,.78);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:4px 10px;font-size:11px;color:#fff;letter-spacing:.08em;font-weight:700;}
+  .card-del{position:absolute;top:10px;right:10px;z-index:6;width:26px;height:26px;border-radius:7px;border:1px solid rgba(255,255,255,.25);background:rgba(6,11,22,.6);color:#fff;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+  .card-del:hover{background:var(--danger);border-color:var(--danger);}
+  .card-body{padding:16px 18px;}
+  .card-content-row{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;}
+  .card-text-col{flex:1;min-width:0;}
+  .card-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:4px;}
+  .card-logo{width:75px;height:75px;flex-shrink:0;object-fit:contain;border-radius:6px;background:#fff;padding:4px;border:1px solid var(--border);}
+  .card-desc{font-size:12px;color:var(--text-muted);line-height:1.6;margin-bottom:12px;}
+  .card-meta{display:flex;gap:8px;flex-wrap:wrap;}
+  .meta-chip{font-size:11px;padding:3px 10px;border-radius:20px;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-elevated-2);}
+  .meta-chip.active{border-color:rgba(31,157,104,.4);color:#1f9d68;background:rgba(31,157,104,.08);}
+  .card-footer{display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft);}
+  .card-action{font-size:12px;color:var(--accent);font-weight:600;}
+  .card-lines-badge{font-size:11px;color:var(--text-muted);}
+
+  .dv-add-card{border:1.5px dashed var(--border-strong);border-radius:var(--radius-md);background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:230px;cursor:pointer;color:var(--text-secondary);transition:border-color .15s,color .15s,background .15s;}
+  .dv-add-card:hover{border-color:var(--accent);color:var(--accent);background:var(--bg-elevated);}
+  .dv-add-plus{font-size:28px;font-weight:400;line-height:1;}
+  .dv-add-label{font-size:13px;font-weight:700;}
+
+  .dv-empty{grid-column:1/-1;padding:60px;text-align:center;color:var(--text-muted);font-size:13.5px;line-height:1.7;}
+  .dv-loading{grid-column:1/-1;padding:50px;text-align:center;color:var(--text-muted);font-size:13px;}
+
+  /* modal */
+  .dvm-backdrop{position:fixed;inset:0;background:rgba(6,11,22,.55);display:none;align-items:center;justify-content:center;z-index:1200;padding:20px;}
+  .dvm-backdrop.open{display:flex;}
+  .dvm{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);width:100%;max-width:460px;box-shadow:0 24px 60px rgba(0,0,0,.3);}
+  .dvm-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border-soft);}
+  .dvm-title{font-size:16px;font-weight:800;color:var(--text-primary);}
+  .dvm-close{background:none;border:none;font-size:22px;line-height:1;color:var(--text-muted);cursor:pointer;}
+  .dvm-body{padding:22px;display:flex;flex-direction:column;gap:16px;}
+  .dvm-field{display:flex;flex-direction:column;gap:6px;}
+  .dvm-field label{font-size:11.5px;font-weight:700;color:var(--text-secondary);letter-spacing:.02em;}
+  .dvm-field input{background:var(--bg-elevated-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 12px;font-size:13px;color:var(--text-primary);outline:none;font-family:var(--font);}
+  .dvm-field input:focus{border-color:var(--accent);}
+  .dvm-grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .dvm-hint{font-size:11px;color:var(--text-muted);margin-top:-6px;line-height:1.5;}
+  .dvm-err{display:none;font-size:12px;color:var(--danger);background:rgba(201,75,66,.08);border:1px solid rgba(201,75,66,.25);border-radius:var(--radius-sm);padding:9px 12px;}
+  .dvm-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 22px;border-top:1px solid var(--border-soft);}
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="dv-page">
+  <nav class="navbar">
+    <a href="{{ url_for('home') }}" class="nav-brand"><img src="{{ url_for('static', filename='images/drogo_logo_full.png') }}" class="nav-brand-logo" alt="Drogo Aerospace"></a>
+    <div class="nav-actions">
+      <div class="nav-user">{{ project.module }} <span>/ {{ project.name }}</span></div>
+      <a href="{{ url_for(back_endpoint) }}" class="btn-ghost">← Back to Projects</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
+    </div>
+  </nav>
+
+  <div class="cover-banner">
+    <div class="banner-text">
+      <div class="banner-title">{{ project.module }} Project</div>
+      <div class="banner-heading">{{ project.name }} · Divisions</div>
+      <div class="banner-sub">Pick a division to open its map and add lines · or add a new division</div>
+    </div>
+    <div class="banner-actions">
+      {% if is_admin %}
+      <button class="btn-add-division" onclick="openAddDivision()">+ Add Division</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="dv-area">
+    <div class="section-label"><span>Divisions</span></div>
+    <div class="dv-grid" id="dv-grid">
+      <div class="dv-loading">Loading divisions…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Division modal -->
+<div class="dvm-backdrop" id="dvm-backdrop">
+  <div class="dvm">
+    <div class="dvm-head">
+      <div class="dvm-title">+ Add Division</div>
+      <button class="dvm-close" onclick="closeAddDivision()">×</button>
+    </div>
+    <div class="dvm-body">
+      <div class="dvm-field"><label>Division Name</label><input id="dvm-name" placeholder="e.g. Asansol GOMD"/></div>
+      <div class="dvm-grid2">
+        <div class="dvm-field"><label>Client Name</label><input id="dvm-client" placeholder="e.g. Power Grid Corporation"/></div>
+        <div class="dvm-field"><label>State</label><input id="dvm-state" placeholder="Madhya Pradesh"/></div>
+      </div>
+      <div class="dvm-field"><label>How Many Towers Covered</label><input id="dvm-towers" type="number" min="0" step="1" placeholder="e.g. 30"/></div>
+      <div class="dvm-grid2">
+        <div class="dvm-field"><label>Latitude</label><input id="dvm-lat" placeholder="23.6850"/></div>
+        <div class="dvm-field"><label>Longitude</label><input id="dvm-lng" placeholder="86.9550"/></div>
+      </div>
+      <div class="dvm-hint">Latitude/longitude place this division on the map — pick roughly where it's centered. You can add and refine lines inside the map.</div>
+      <div class="dvm-err" id="dvm-err"></div>
+    </div>
+    <div class="dvm-foot">
+      <button class="btn-ghost" onclick="closeAddDivision()">Cancel</button>
+      <button class="btn-primary" id="dvm-submit" onclick="submitAddDivision()">Save Division</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const PROJECT_ID = {{ project.id }};
+  const IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  const MAP_BASE = "{{ url_for('projects_bp.project_map', project_id=project.id) }}";
+  const PROJECT_TAG = {{ (project.state or project.module or 'DIVISION')|upper|tojson }};
+  const PROJECT_LOGO = {{ (('/static/' ~ project.logo_path) if project.logo_path else '')|tojson }};
+  const DEFAULT_COVER = {{ url_for('static', filename='images/marketing_rgb.jpg')|tojson }};
+  const PROJECT_BANNER = {{ (project.legacy_banner or '')|tojson }} || DEFAULT_COVER;
+
+  function escapeHtml(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+  async function loadDivisions(){
+    const grid = document.getElementById('dv-grid');
+    try {
+      const res = await fetch(`/api/projects/${PROJECT_ID}/divisions`);
+      const data = await res.json();
+      const divisions = (data && data.divisions) || [];
+      let html = '';
+      divisions.forEach(d => {
+        const lc = d.line_count || 0;
+        const desc = [d.client_name, d.state].filter(Boolean).join(', ') || 'No location set';
+        const logoImg = PROJECT_LOGO
+          ? `<img class="card-logo" src="${escapeHtml(PROJECT_LOGO)}" alt="${escapeHtml(d.name)} logo"/>`
+          : '';
+        const delBtn = IS_ADMIN
+          ? `<button class="card-del" title="Delete division" onclick="deleteDivision(event, ${d.id}, '${escapeHtml(d.name).replace(/'/g,"\\'")}')">×</button>`
+          : '';
+        html += `
+          <a href="${MAP_BASE}?division=${d.id}" class="division-card">
+            <div class="card-banner" style="background-image:url('${escapeHtml(PROJECT_BANNER)}');">
+              <div class="card-tag">${escapeHtml(PROJECT_TAG)}</div>
+              ${delBtn}
+            </div>
+            <div class="card-body">
+              <div class="card-content-row">
+                <div class="card-text-col">
+                  <div class="card-title">${escapeHtml(d.name)}</div>
+                  <div class="card-desc">${escapeHtml(desc)}</div>
+                  <div class="card-meta">
+                    <span class="meta-chip active">Active</span>
+                    ${d.planned_towers != null ? `<span class="meta-chip">${d.planned_towers} towers planned</span>` : ''}
+                  </div>
+                </div>
+                ${logoImg}
+              </div>
+              <div class="card-footer">
+                <span class="card-action">Open Division →</span>
+                <span class="card-lines-badge">${lc} line${lc===1?'':'s'}</span>
+              </div>
+            </div>
+          </a>`;
+      });
+      if (IS_ADMIN){
+        html += `<div class="dv-add-card" onclick="openAddDivision()"><div class="dv-add-plus">+</div><div class="dv-add-label">Add Division</div></div>`;
+      }
+      if (!divisions.length && !IS_ADMIN){
+        html = `<div class="dv-empty">No divisions have been added to this project yet.</div>`;
+      }
+      grid.innerHTML = html;
+    } catch(e){
+      grid.innerHTML = `<div class="dv-empty">Could not load divisions. Please refresh.</div>`;
+    }
+  }
+
+  function openAddDivision(){
+    if (!IS_ADMIN) return;
+    ['dvm-name','dvm-client','dvm-state','dvm-towers','dvm-lat','dvm-lng'].forEach(id=>document.getElementById(id).value='');
+    document.getElementById('dvm-err').style.display='none';
+    document.getElementById('dvm-backdrop').classList.add('open');
+  }
+  function closeAddDivision(){ document.getElementById('dvm-backdrop').classList.remove('open'); }
+
+  async function submitAddDivision(){
+    const name = document.getElementById('dvm-name').value.trim();
+    const lat = parseFloat(document.getElementById('dvm-lat').value);
+    const lng = parseFloat(document.getElementById('dvm-lng').value);
+    const err = document.getElementById('dvm-err');
+    err.style.display='none';
+    if (!name){ err.textContent='Division name is required.'; err.style.display='block'; return; }
+    if (isNaN(lat) || isNaN(lng)){ err.textContent='Latitude and longitude must be numbers.'; err.style.display='block'; return; }
+    const btn = document.getElementById('dvm-submit');
+    btn.disabled=true; btn.textContent='Saving…';
+    try {
+      const towersRaw = document.getElementById('dvm-towers').value;
+      const res = await fetch(`/api/projects/${PROJECT_ID}/divisions`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          name, latitude:lat, longitude:lng,
+          client_name: document.getElementById('dvm-client').value.trim(),
+          state: document.getElementById('dvm-state').value.trim(),
+          planned_towers: towersRaw==='' ? null : towersRaw
+        })
+      });
+      const data = await res.json();
+      if (!res.ok){ err.textContent=data.error || 'Could not save division.'; err.style.display='block'; return; }
+      closeAddDivision();
+      await loadDivisions();
+    } catch(e){
+      err.textContent='Network error — please try again.'; err.style.display='block';
+    } finally {
+      btn.disabled=false; btn.textContent='Save Division';
+    }
+  }
+
+  async function deleteDivision(ev, id, name){
+    ev.preventDefault(); ev.stopPropagation();
+    if (!IS_ADMIN) return;
+    const pwd = prompt(`Delete division "${name}" and everything under it (lines, photos, defects)?\n\nThis cannot be undone. Enter the delete password to confirm:`);
+    if (pwd === null) return;
+    try {
+      const res = await fetch(`/api/divisions/${id}`, {
+        method:'DELETE', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: pwd })
+      });
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok){ alert(data.error || 'Could not delete division.'); return; }
+      await loadDivisions();
+    } catch(e){ alert('Network error — please try again.'); }
+  }
+
+  document.getElementById('dvm-backdrop').addEventListener('click', e => { if (e.target.id==='dvm-backdrop') closeAddDivision(); });
+  loadDivisions();
+</script>
+{% endblock %}

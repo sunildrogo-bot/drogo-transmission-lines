@@ -50,7 +50,7 @@
     <div class="nav-actions">
       <div class="nav-user">Welcome, <span>{{ user_name.split()[0] }}</span></div>
       <a href="{{ url_for('admin') }}" class="btn-ghost">← Dashboard</a>
-      <a href="{{ url_for('logout') }}" class="btn-logout">Logout</a>
+      <form method="POST" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-logout">Logout</button></form>
     </div>
   </nav>
   <div class="cover-banner">

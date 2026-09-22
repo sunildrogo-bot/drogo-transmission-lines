@@ -3,11 +3,9 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="csrf-token" content="{{ csrf_token() }}"/>
   <title>{% block title %}NOVA+{% endblock %}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}"/>
   <style>
     :root{
       /* ---- Drogo Aerospace design system ---- */
@@ -32,13 +30,21 @@
       --radius-sm:8px;
       --radius-md:12px;
       --radius-lg:18px;
-      --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      --font:'Segoe UI',-apple-system,BlinkMacSystemFont,Arial,sans-serif;
     }
     *{box-sizing:border-box;margin:0;padding:0;}
     html,body{height:100%;font-family:var(--font);background:var(--bg-base);color:var(--text-primary);}
+    .drogo-map-tiles-unavailable{background:#eef0f2!important;}
 
     /* Navbar */
     .navbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;border-bottom:1px solid var(--border-soft);background:var(--bg-panel);flex-shrink:0;}
+    .app-breadcrumb{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11.5px;color:var(--text-muted);padding:10px 28px;background:var(--bg-panel);border-bottom:1px solid var(--border-soft)}
+    .app-breadcrumb a{color:var(--text-secondary);text-decoration:none}.app-breadcrumb a:hover{color:var(--text-primary)}
+    .app-breadcrumb span[aria-current="page"]{color:var(--text-primary);font-weight:600}.app-breadcrumb-separator{color:var(--border-strong)}
+    .modal{max-height:calc(100dvh - 40px);overflow-y:auto}.modal-backdrop{overflow-y:auto}
+    img{max-width:100%}.nav-actions,.modal-footer{flex-wrap:wrap}
+    @supports not (height:100dvh){.modal{max-height:calc(100vh - 40px)}}
+    @media(max-width:800px){.app-breadcrumb{padding:9px 18px;white-space:nowrap;overflow-x:auto;flex-wrap:nowrap}}
     .nav-brand{display:flex;align-items:center;gap:9px;font-size:18px;font-weight:800;color:var(--text-primary);letter-spacing:.04em;cursor:pointer;text-decoration:none;}
     .nav-brand-mark{width:26px;height:26px;flex-shrink:0;color:var(--accent);}
     .nav-brand-logo{height:32px;width:auto;display:block;}
@@ -54,7 +60,7 @@
     .btn-secondary:hover{background:var(--bg-elevated-2);border-color:var(--accent);}
     .nav-user{font-size:13px;color:var(--text-secondary);}
     .nav-user span{color:var(--accent-light);font-weight:600;}
-    .btn-logout{font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s;text-decoration:none;display:inline-block;}
+    .btn-logout{font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s;text-decoration:none;display:inline-block;}
     .btn-logout:hover{border-color:var(--danger);color:var(--danger);}
 
     /* Shared form field (used by admin "add user" form) */
@@ -66,7 +72,7 @@
 
     .error-msg{font-size:12.5px;color:var(--danger);text-align:center;background:rgba(201,75,66,.08);border:1px solid rgba(201,75,66,.3);border-radius:var(--radius-sm);padding:9px;}
 
-    /* Shared delete-confirm modal (used by projects.js / chimney.js) */
+    /* Shared delete-confirm modal used by project management. */
     .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center;}
     .modal-backdrop.open{display:flex;}
     .modal{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);width:100%;max-width:420px;padding:26px 28px;box-shadow:0 20px 60px rgba(0,0,0,.18);position:relative;}
@@ -93,7 +99,55 @@
     .ann-ticker-item b{color:var(--text-primary);font-weight:700;}
     .ann-ticker-dot{color:var(--border-strong);}
     @keyframes ann-scroll{from{transform:translateX(0);}to{transform:translateX(-50%);}}
+    .global-notif-btn{position:fixed;right:22px;bottom:76px;z-index:980;width:42px;height:42px;border-radius:50%;border:1px solid var(--border);background:var(--bg-panel);box-shadow:0 5px 18px rgba(0,0,0,.15);cursor:pointer;font-size:18px;}
+    .global-notif-badge{position:absolute;right:-3px;top:-4px;min-width:17px;height:17px;border-radius:10px;background:var(--danger);color:#fff;font-size:9px;font-weight:800;display:none;align-items:center;justify-content:center;padding:0 4px;}
+    .global-notif-badge.show{display:flex;}
+    .notif-row{display:block;padding:11px 12px;border:1px solid var(--border-soft);border-radius:9px;margin-bottom:8px;text-decoration:none;color:inherit;background:var(--bg-elevated-2);}
+    .notif-row.unread{border-left:4px solid var(--accent-sky);background:var(--bg-panel);}
+    .notif-title{font-size:12.5px;font-weight:750;color:var(--text-primary);}
+    .notif-message{font-size:11px;color:var(--text-secondary);margin-top:3px;line-height:1.4;}
+    .notif-time{font-size:9.5px;color:var(--text-muted);margin-top:5px;}
   </style>
+  <script>
+    // Add the per-session CSRF token to every unsafe same-origin fetch/XHR.
+    // Existing page scripts do not each need their own security plumbing.
+    (() => {
+      const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
+      const unsafe = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+      const isSameOrigin = value => {
+        try {
+          const raw = value instanceof Request ? value.url : String(value || '');
+          return new URL(raw, window.location.href).origin === window.location.origin;
+        } catch (_) { return false; }
+      };
+
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, init = {}) => {
+        const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (token && unsafe.has(method) && isSameOrigin(input)) {
+          const headers = new Headers(input instanceof Request ? input.headers : undefined);
+          new Headers(init.headers || {}).forEach((value, key) => headers.set(key, value));
+          headers.set('X-CSRF-Token', token);
+          init = { ...init, headers };
+        }
+        return originalFetch(input, init);
+      };
+
+      const originalOpen = XMLHttpRequest.prototype.open;
+      const originalSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__novaCsrfMethod = String(method || 'GET').toUpperCase();
+        this.__novaCsrfUrl = url;
+        return originalOpen.call(this, method, url, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function(body) {
+        if (token && unsafe.has(this.__novaCsrfMethod) && isSameOrigin(this.__novaCsrfUrl)) {
+          this.setRequestHeader('X-CSRF-Token', token);
+        }
+        return originalSend.call(this, body);
+      };
+    })();
+  </script>
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -135,6 +189,19 @@
 {% endif %}
 {% block body %}{% endblock %}
 
+{% if session.user_id %}
+  {% if session.role != 'SME' %}
+  <button class="global-notif-btn" onclick="openGlobalNotifications()" title="Notifications">🔔<span class="global-notif-badge" id="global-notif-badge">0</span></button>
+  {% endif %}
+  <div class="modal-backdrop" id="global-notif-modal">
+    <div class="modal" style="max-width:500px;max-height:75vh;display:flex;flex-direction:column;">
+      <div class="modal-header"><div class="modal-title">Notifications</div><button class="modal-close" onclick="closeGlobalNotifications()">×</button></div>
+      <div id="global-notif-list" style="overflow-y:auto;min-height:80px;"></div>
+      <div class="modal-footer"><button class="btn-ghost" onclick="markAllNotificationsRead()">Mark all read</button><button class="btn-primary" onclick="closeGlobalNotifications()">Close</button></div>
+    </div>
+  </div>
+{% endif %}
+
 <!-- ── Shared delete confirmation modal (password-protected) ── -->
 <div class="modal-backdrop" id="delete-confirm-modal">
   <div class="modal">
@@ -158,8 +225,7 @@
 </div>
 
 <script>
-  // Shared delete-with-password flow. Call:
-  //   requestDelete({ url: '/api/chimney-projects/12', label: 'Unit-2 Flue Stack', onSuccess: () => location.reload() })
+  // Shared delete-with-password flow for protected project data.
   let _deleteConfirmState = null;
 
   function requestDelete(opts) {
@@ -210,8 +276,64 @@
   }
 </script>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/pmtiles/pmtiles.js') }}"></script>
+<script>
+window.addDrogoBaseLayer = function(map) {
+  const mode = {{ map_tile_mode|tojson }};
+  const archiveUrl = {{ pmtiles_url|tojson }};
+  const tileUrl = {{ map_tile_url|tojson }};
+  const attribution = {{ map_tile_attribution|tojson }};
+  if (mode === 'pmtiles' && window.pmtiles && archiveUrl) {
+    const archive = new pmtiles.PMTiles(archiveUrl);
+    return pmtiles.leafletRasterLayer(archive, {attribution: 'Offline map'}).addTo(map);
+  }
+  if (mode === 'none' || !tileUrl) return L.layerGroup().addTo(map);
+  const layer = L.tileLayer(tileUrl, {maxZoom: 20, attribution: attribution || ''}).addTo(map);
+  let failures = 0;
+  layer.on('tileerror', () => {
+    failures += 1;
+    if (failures === 3) map.getContainer().classList.add('drogo-map-tiles-unavailable');
+  });
+  return layer;
+};
+</script>
 {% if session.user_id %}
+<script>
+  let _globalNotifications = [];
+  function _notifEscape(value) { const el=document.createElement('div'); el.textContent=value == null ? '' : String(value); return el.innerHTML; }
+  function _updateNotificationBadge(count) {
+    const badge = document.getElementById('{{ "pd-notif-badge" if session.role == "SME" else "global-notif-badge" }}');
+    if (!badge) return;
+    badge.textContent = count > 99 ? '99+' : count;
+    badge.classList.toggle('show', count > 0);
+  }
+  async function loadGlobalNotifications() {
+    try {
+      const res = await fetch('/api/notifications');
+      const data = await res.json();
+      if (!res.ok) return;
+      _globalNotifications = data.notifications || [];
+      _updateNotificationBadge(data.unread || 0);
+    } catch (_) {}
+  }
+  function renderGlobalNotifications() {
+    const box = document.getElementById('global-notif-list');
+    if (!box) return;
+    box.innerHTML = _globalNotifications.length ? _globalNotifications.map(n => `<a class="notif-row ${n.is_read ? '' : 'unread'}" href="${_notifEscape(n.link_url || 'javascript:void(0)')}">
+      <div class="notif-title">${_notifEscape(n.title)}</div><div class="notif-message">${_notifEscape(n.message)}</div><div class="notif-time">${_notifEscape(n.created_at)}</div></a>`).join('') : '<div style="padding:35px;text-align:center;color:var(--text-muted);font-size:12px;">No notifications yet.</div>';
+  }
+  async function openGlobalNotifications() {
+    await loadGlobalNotifications(); renderGlobalNotifications();
+    document.getElementById('global-notif-modal').classList.add('open');
+  }
+  function closeGlobalNotifications() { document.getElementById('global-notif-modal').classList.remove('open'); }
+  async function markAllNotificationsRead() {
+    await fetch('/api/notifications/read', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    _globalNotifications.forEach(n => n.is_read = true); _updateNotificationBadge(0); renderGlobalNotifications();
+  }
+  document.addEventListener('DOMContentLoaded', loadGlobalNotifications);
+</script>
 <!-- ── AI Assistant — floating chat widget, bottom-right, every page ── -->
 <style>
   #ai-chat-toggle {

@@ -1,0 +1,81 @@
+"""Required-feature registry used by Settings and the safe release builder."""
+from pathlib import Path
+
+APPLICATION_VERSION = '1.32.0'
+
+FEATURES = (
+    ('image_review_reliability', 'Current-photo response isolation', 'templates/project_map.html', 'photoViewIsCurrent'),
+    ('edited_map_refresh', 'KML edits rebuild map geometry', 'projects_routes.py', 'uploads/kml_edits/'),
+    ('new_image_review', 'New uploads require fresh SME release', 'projects_routes.py', '_reopen_tower_for_new_photo'),
+    ('admin_dashboard', 'Admin Dashboard', 'templates/admin.html', 'api/dashboard/summary'),
+    ('user_management', 'User Management', 'templates/users.html', '/api/users'),
+    ('module_management', 'Module Management', 'templates/admin.html', 'view=modules'),
+    ('inspection_quality', 'Inspection Quality', 'templates/inspection_quality.html', '/api/inspection-quality'),
+    ('settings', 'Settings', 'templates/settings.html', 'Application Settings'),
+    ('project_navigation', 'Project, Division and Line navigation', 'templates/project_map.html', '/api/divisions/'),
+    ('rgb_thermal', 'RGB and Thermal galleries', 'templates/project_map.html', 'thermal-points'),
+    ('tower_filters', 'Tower filters', 'templates/project_map.html', 'Critical Defects'),
+    ('defect_marking', 'Defect marking', 'projects_routes.py', 'api_create_tower_defect'),
+    ('defect_location_status', 'Expanded defect location and status', 'templates/project_map.html', 'COMMON_DEFECT_STATUS_OPTIONS'),
+    ('inspection_done', 'Inspection Done', 'projects_routes.py', 'inspection-done'),
+    ('client_closure', 'Client defect closure', 'projects_routes.py', 'resolution_status'),
+    ('pdf_reports', 'PDF reports', 'tower_report.py', 'build_tower_report_pdf'),
+    ('training_export', 'Training Dataset Export', 'training_export_routes.py', '/api/training-datasets'),
+    ('backup_recovery', 'Backup and Recovery', 'backup_routes.py', '/api/settings/backups'),
+    ('notifications', 'Notifications', 'notification_routes.py', '/api/notifications'),
+    ('ai_summaries', 'AI summaries', 'assistant_api.py', 'tool_generate_central_report'),
+    ('background_worker', 'Background worker', 'background_jobs.py', 'HANDLERS'),
+    ('private_storage', 'Private file access', 'access_control.py', 'can_access_upload'),
+    ('release_history', 'Release compatibility', 'feature_registry.py', 'assert_source_compatible'),
+    ('gallery_pagination', 'Complete gallery pagination', 'templates/project_map.html', 'next_after_id'),
+    ('activity_pagination', 'Paginated Activity Log', 'settings_routes.py', "category_terms"),
+    ('resilient_maps', 'Resilient configurable maps', 'templates/base.html', 'map_tile_url'),
+    ('deployment_health', 'Production deployment health', 'settings_routes.py', "details['web']"),
+    ('data_repair', 'Data integrity repair centre', 'backup_routes.py', '/api/settings/data-health/relink'),
+    ('workflow_regression', 'End-to-end workflow regression', 'tests/test_workflow_end_to_end.py', 'test_upload_inspect_release_client_close_report_and_dataset_preview'),
+    ('storage_control_centre', 'Uploads and Storage control centre', 'templates/settings.html', 'project-data-grid'),
+    ('transmission_card_covers', 'Transmission project and division covers', 'static/js/projects.js', 'marketing_rgb.jpg'),
+    ('defect_edit_search', 'Editable and searchable defect records', 'templates/project_map.html', 'startEditDefect'),
+    ('active_defect_consistency', 'Soft-deleted defects excluded from active results', 'models.py', 'active_defects ='),
+    ('image_viewer_controls', 'Scoped image zoom and pointer panning', 'templates/project_map.html', "wrap.addEventListener('pointerdown'"),
+    ('duplicate_image_control', 'Duplicate image scan, cleanup and upload prevention', 'duplicate_photos.py', 'analyse_duplicate_photos'),
+    ('review_end_notification', 'End-of-image review notification', 'templates/project_map.html', 'notifyImageSequenceComplete'),
+    ('inspection_autofill_control', 'Inspection fields ignore credential autofill', 'templates/project_map.html', 'name="inspection_component"'),
+    ('duplicate_scan_progress', 'Live duplicate-scan percentage, counts and ETA', 'static/js/settings.js', 'duplicateProgressView'),
+    ('fresh_migration_recovery', 'Fresh database migration recovery', 'migrations/versions/20260825_0007_photo_review_progress.py', 'fk_tower_photos_reviewed_by_user_id_users'),
+    ('sqlite_integrity', 'SQLite foreign keys, WAL and write timeout', 'runtime_safety.py', "PRAGMA foreign_keys=ON"),
+    ('permanent_processes', 'Supervised production web and worker processes', 'production_start.py', "_start('worker'"),
+    ('offsite_backup', 'Streaming restore-verified offsite checkpoints', 'offsite_backup.py', 'Completed and restore-verified'),
+    ('phase1_verification', 'Cross-platform Phase 1 verification', 'scripts/verify_phase1.py', 'UPDATE 30 PHASE 1 VERIFICATION: PASSED'),
+    ('verified_sqlite_snapshot', 'Verified SQLite backup helper', 'scripts/snapshot_sqlite.py', 'Integrity: ok'),
+)
+
+
+def source_compatibility(root):
+    root = Path(root)
+    results = []
+    for key, name, relative, marker in FEATURES:
+        path = root / relative
+        available = path.is_file()
+        message = ''
+        if available:
+            try:
+                available = marker in path.read_text(encoding='utf-8', errors='replace')
+            except OSError as exc:
+                available, message = False, str(exc)
+        if not available and not message:
+            message = f'Missing {relative} or required marker.'
+        results.append({'key': key, 'name': name, 'available': available,
+                        'file': relative, 'message': message})
+    passed = sum(row['available'] for row in results)
+    return {'version': APPLICATION_VERSION, 'passed': passed, 'missing': len(results) - passed,
+            'total': len(results), 'compatible': all(row['available'] for row in results),
+            'features': results}
+
+
+def assert_source_compatible(root):
+    report = source_compatibility(root)
+    if not report['compatible']:
+        names = ', '.join(row['name'] for row in report['features'] if not row['available'])
+        raise RuntimeError(f'Release blocked: required features are missing: {names}.')
+    return report

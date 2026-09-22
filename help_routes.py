@@ -26,7 +26,7 @@ def api_list_help_tickets():
         return guard
     q = HelpTicket.query.order_by(HelpTicket.created_at.desc())
     if session.get('role') != 'Admin':
-        q = q.filter_by(submitted_by=session.get('user_name', ''))
+        q = q.filter_by(submitted_by_user_id=session.get('user_id'))
     tickets = q.limit(100).all()
     return jsonify({'tickets': [t.to_dict() for t in tickets]})
 
@@ -42,15 +42,14 @@ def api_create_help_ticket():
     if not subject:
         return jsonify({'error': 'Please describe the problem in a few words (subject).'}), 400
 
-    reporter_type = (data.get('reporter_type') or '').strip()
-    if reporter_type not in ('Client', 'Pilot', 'Admin', 'SME'):
-        reporter_type = {'Admin': 'Admin', 'SME': 'SME', 'Pilot': 'Pilot'}.get(session.get('role'), 'Client')
+    reporter_type = {'Admin': 'Admin', 'SME': 'SME', 'Pilot': 'Pilot'}.get(session.get('role'), 'Client')
 
     ticket = HelpTicket(
         subject=subject,
         description=(data.get('description') or '').strip(),
         reporter_type=reporter_type,
         submitted_by=session.get('user_name', ''),
+        submitted_by_user_id=session.get('user_id'),
         status='Open',
         seen_by_reporter=True,
     )
@@ -66,12 +65,17 @@ def api_update_help_ticket(ticket_id):
         return guard
 
     ticket = HelpTicket.query.get_or_404(ticket_id)
+    is_admin = session.get('role') == 'Admin'
+    is_owner = ticket.submitted_by_user_id == session.get('user_id')
+    if not is_admin and not is_owner:
+        return jsonify({'error': 'You do not have access to this ticket.'}), 403
+
     data = request.get_json(force=True, silent=True) or {}
 
     # Admin moves it through Checking / Resolved — flips seen_by_reporter
     # off so the raiser sees it's changed next time they check.
     if 'status' in data:
-        if session.get('role') != 'Admin':
+        if not is_admin:
             return jsonify({'error': 'Only Admin can update ticket status.'}), 403
         status = (data.get('status') or '').strip()
         if status not in HelpTicket.STATUSES:
@@ -84,7 +88,7 @@ def api_update_help_ticket(ticket_id):
     # The raiser marks it seen once they've checked the update — anyone
     # can mark their own ticket seen, not just Admin.
     if data.get('mark_seen'):
-        if ticket.submitted_by == session.get('user_name', '') or session.get('role') == 'Admin':
+        if is_owner or is_admin:
             ticket.seen_by_reporter = True
 
     db.session.commit()

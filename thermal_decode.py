@@ -196,7 +196,10 @@ def _decode_full_matrix(image_abs_path, params_dict):
     rc = lib.dirp_create_from_rjpeg(data, len(data), ctypes.byref(handle))
     if rc != 0:
         raise ThermalDecodeError(
-            f'dirp_create_from_rjpeg failed (code {rc}) — is this actually a DJI R-JPEG with embedded thermal data?'
+            f'dirp_create_from_rjpeg failed (code {rc}) — this file has no readable DJI thermal data. '
+            f'It is usually a photo that was re-saved or compressed before upload (WhatsApp, Google Photos, '
+            f'Windows Photos, a screenshot), which strips the radiometric data, or a non-radiometric image. '
+            f'Upload the original _T.JPG straight off the drone/SD card.'
         )
     try:
         resolution = DirpResolution()
@@ -367,3 +370,108 @@ def get_shape_stats(image_abs_path, shape_type, coords_pct, params_dict=None):
         return float(vals.mean()), float(vals.min()), float(vals.max()), ra, rmn, rmx, ''
 
     return None, None, None, None, None, None, f'Unknown shape_type: {shape_type}'
+
+
+def sdk_health():
+    """Diagnostic used by the admin-only /api/thermal/health endpoint.
+    Reports whether the native DJI Thermal SDK can be loaded on THIS
+    machine and, if not, the exact reason — so a thermal failure on a
+    deployed server can be diagnosed without digging through logs. Note:
+    this only checks that the SDK loads; a photo can still fail to decode
+    if it isn't a genuine radiometric R-JPEG (see get_shape_stats errors)."""
+    lib = _load_lib()
+    lib_path = os.path.join(THERMAL_SDK_DIR, _LIB_FILENAME) if THERMAL_SDK_DIR else ''
+    return {
+        'platform': platform.system(),
+        'sdk_dir': THERMAL_SDK_DIR,
+        'lib_filename': _LIB_FILENAME,
+        'lib_file_present': bool(lib_path) and os.path.exists(lib_path),
+        'sdk_loaded': lib is not None,
+        'error': _lib_load_error,
+    }
+
+
+def _interpret_create_code(rc):
+    """Human explanation for a dirp_create_from_rjpeg return code, for the
+    per-photo probe below."""
+    if rc == 0:
+        return 'OK — valid radiometric R-JPEG.'
+    if rc == -7:
+        return ('Code -7 (R-JPEG parse): the SDK loaded fine but this file is not a parseable DJI '
+                'radiometric R-JPEG. Usual causes: (1) the photo was re-saved/compressed somewhere '
+                'between the drone and upload (WhatsApp, Google Photos, Windows Photos auto-rotate, a '
+                'screenshot) which strips DJI\'s embedded thermal payload; (2) it is a colourised thermal '
+                'preview with no radiometric data, not the real _T.JPG; or (3) it is from a camera model '
+                'this SDK build does not support. Upload the original _T.JPG straight off the SD card.')
+    return f'Code {rc}: the SDK could not process this file (see DJI dirp_api.h ret codes).'
+
+
+def probe_rjpeg(image_abs_path):
+    """Admin diagnostic for a single photo behind /api/thermal/probe/<id>.
+    Inspects the STORED file and reports whether it is a genuine
+    radiometric DJI R-JPEG — so a -7 failure can be pinned to the file
+    itself (stripped/compressed/unsupported) rather than the SDK."""
+    info = {'path_exists': os.path.exists(image_abs_path)}
+    if not info['path_exists']:
+        info['verdict'] = 'No saved image file at the expected path.'
+        return info
+    with open(image_abs_path, 'rb') as f:
+        data = f.read()
+    n = len(data)
+    info['size_bytes'] = n
+    info['is_jpeg'] = data[:2] == b'\xff\xd8'
+
+    # Walk JPEG marker segments and list the APPn blocks (DJI's thermal
+    # payload lives in APP markers; a re-saved file loses them).
+    apps = []
+    has_dji = False
+    i = 2
+    while i + 4 <= n and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker in (0xD9,):            # EOI
+            break
+        if marker == 0xDA:               # SOS — compressed scan follows
+            break
+        if 0xD0 <= marker <= 0xD7 or marker == 0x01:  # RSTn / TEM: no length
+            i += 2
+            continue
+        if i + 4 > n:
+            break
+        seglen = int.from_bytes(data[i + 2:i + 4], 'big')
+        if 0xE0 <= marker <= 0xEF:
+            seg = data[i + 4:i + 2 + seglen]
+            apps.append(f'APP{marker - 0xE0} ({seglen} bytes)')
+            if b'DJI' in seg[:64]:
+                has_dji = True
+        i += 2 + seglen
+    info['app_segments'] = apps
+    info['has_dji_marker'] = has_dji
+
+    eoi = data.rfind(b'\xff\xd9')
+    info['bytes_after_eoi'] = (n - (eoi + 2)) if eoi != -1 else None
+
+    try:
+        with Image.open(image_abs_path) as im:
+            applist = getattr(im, 'applist', None) or []
+        info['app3_thermal_bytes'] = sum(len(c) for t, c in applist if t == 'APP3')
+    except Exception:
+        info['app3_thermal_bytes'] = None
+
+    lib = _load_lib()
+    if lib is None:
+        info['sdk_loaded'] = False
+        info['sdk_error'] = _lib_load_error
+        info['create_code'] = None
+        info['verdict'] = 'Thermal SDK is not loading on this server — see /api/thermal/health.'
+        return info
+    info['sdk_loaded'] = True
+    handle = ctypes.c_void_p()
+    rc = lib.dirp_create_from_rjpeg(data, len(data), ctypes.byref(handle))
+    info['create_code'] = rc
+    if rc == 0:
+        res = DirpResolution()
+        if lib.dirp_get_rjpeg_resolution(handle, ctypes.byref(res)) == 0:
+            info['thermal_resolution'] = f'{res.width}x{res.height}'
+        lib.dirp_destroy(handle)
+    info['verdict'] = _interpret_create_code(rc)
+    return info
