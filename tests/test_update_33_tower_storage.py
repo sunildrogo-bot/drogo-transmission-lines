@@ -114,6 +114,35 @@ class TowerStorageRetentionTests(unittest.TestCase):
             self.assertEqual(image_response.status_code, expected)
             image_response.close()
 
+    def test_data_health_ignores_intentionally_archived_raw_paths(self):
+        ids = self._prepare_tower(completed=True)
+        self._role('Admin', self.ids['admin'])
+        with self.app.app_context():
+            raw_paths = {
+                db.session.get(TowerPhoto, photo_id).image_path
+                for photo_id in (ids['rgb'], ids['thermal'], ids['clean'])
+            }
+
+        cleanup = self._delete(
+            f"/api/settings/lines/{self.ids['line']}/towers/T1/raw-images",
+            {'password': 'test-delete-password'})
+        self.assertEqual(cleanup.status_code, 200, cleanup.get_data(as_text=True))
+
+        response = self.http.get('/api/settings/data-health')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        files = response.get_json()['files']
+        self.assertEqual(files['archived_raw_reference_count'], 3)
+        self.assertTrue(raw_paths.isdisjoint(files['missing_examples']))
+        self.assertTrue(all(
+            suggestion['missing'] not in raw_paths
+            for suggestion in files['relink_suggestions']))
+
+        csv_response = self.http.get('/api/settings/data-health/issues.csv')
+        self.assertEqual(csv_response.status_code, 200, csv_response.get_data(as_text=True))
+        csv_text = csv_response.get_data(as_text=True)
+        for raw_path in raw_paths:
+            self.assertNotIn(raw_path, csv_text)
+
     def test_findings_cleanup_is_separate_and_invalidates_generated_outputs(self):
         ids = self._prepare_tower(completed=True)
         self._role('Admin', self.ids['admin'])

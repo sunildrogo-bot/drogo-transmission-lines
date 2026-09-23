@@ -1,7 +1,7 @@
 """Required-feature registry used by Settings and the safe release builder."""
 from pathlib import Path
 
-APPLICATION_VERSION = '1.33.0'
+APPLICATION_VERSION = '1.33.1'
 
 FEATURES = (
     ('image_review_reliability', 'Current-photo response isolation', 'templates/project_map.html', 'photoViewIsCurrent'),

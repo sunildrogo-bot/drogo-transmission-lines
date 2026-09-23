@@ -1,4 +1,4 @@
-Update 33 (v1.33.0): see [UPDATE_33.md](UPDATE_33.md) for completed-tower storage cleanup and RGB/thermal evidence retention. Update 32 details remain in [UPDATE_32.md](UPDATE_32.md).
+Update 33.1 (v1.33.1) corrects Data Health so intentionally deleted raw-photo paths are not reported as missing; preserved findings evidence is still verified. See [UPDATE_33.md](UPDATE_33.md) for completed-tower storage cleanup and RGB/thermal evidence retention. Update 32 details remain in [UPDATE_32.md](UPDATE_32.md).
 
 Update 31 (v1.31.0): see [UPDATE_31.md](UPDATE_31.md) for changes and upgrade instructions.
 

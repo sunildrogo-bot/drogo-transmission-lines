@@ -1,6 +1,8 @@
 # Update 33 — Completed tower storage management
 
-Version: 1.33.0. Cumulative from Update 32.
+Version: 1.33.1. Cumulative from Update 32.
+
+Patch 1.33.1 makes Backup & Recovery Data Health treat raw paths removed by the completed-tower cleanup as intentional archives, not missing database-linked files. Preserved RGB/thermal finding evidence continues to be checked normally.
 
 ## Tower storage browser
 

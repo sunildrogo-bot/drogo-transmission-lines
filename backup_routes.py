@@ -102,6 +102,23 @@ def _normalise_stored_path(value):
     return path[len('static/'):] if path.startswith('static/') else path
 
 
+def _tracked_fields_for_row(model, row, names):
+    """Return only file references that are expected to exist on storage.
+
+    Completed-tower cleanup deliberately retains the TowerPhoto database row
+    for its review/audit history after deleting the raw file.  The non-nullable
+    image_path remains as historical metadata, so it must not be reported as a
+    broken live storage reference.  Preserved finding evidence remains tracked.
+    """
+    for name in names:
+        if model is TowerPhoto and row.raw_deleted:
+            if name == 'image_path':
+                continue
+            if name == 'thumbnail_path' and not row.defect_copy_path:
+                continue
+        yield name
+
+
 def _tracked_upload_paths():
     tracked = set()
     fields = [
@@ -116,7 +133,7 @@ def _tracked_upload_paths():
     ]
     for model, names in fields:
         for row in model.query.all():
-            for name in names:
+            for name in _tracked_fields_for_row(model, row, names):
                 value = _normalise_stored_path(getattr(row, name, ''))
                 if value.startswith('uploads/'):
                     tracked.add(value)
@@ -133,7 +150,7 @@ def _tracked_upload_references():
     ]
     for model, names in fields:
         for row in model.query.all():
-            for field in names:
+            for field in _tracked_fields_for_row(model, row, names):
                 key = _normalise_stored_path(getattr(row, field, ''))
                 if key.startswith('uploads/'):
                     yield model.__tablename__, row, field, key
@@ -224,8 +241,10 @@ def _health_payload(app):
                                        'category': _file_category(old_key)})
     missing_thumbnails = sum(
         1 for photo in TowerPhoto.query.filter(TowerPhoto.thumbnail_path.isnot(None)).all()
-        if _normalise_stored_path(photo.thumbnail_path) not in actual
+        if not (photo.raw_deleted and not photo.defect_copy_path)
+        and _normalise_stored_path(photo.thumbnail_path) not in actual
     )
+    archived_raw_references = TowerPhoto.query.filter(TowerPhoto.raw_deleted.is_(True)).count()
     database_path = _sqlite_database_path()
     database_ok = bool(database_path and os.path.isfile(database_path)) if database_path else True
     disk = shutil.disk_usage(app.instance_path)
@@ -264,6 +283,7 @@ def _health_payload(app):
             'missing_by_category': missing_by_category,
             'untracked_count': len(untracked), 'untracked_examples': untracked[:50],
             'missing_thumbnail_count': missing_thumbnails,
+            'archived_raw_reference_count': archived_raw_references,
             'relink_suggestions': relink_suggestions[:100],
         },
         'disk': {'free_bytes': disk.free, 'free': _format_bytes(disk.free)},
