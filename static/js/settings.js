@@ -486,11 +486,14 @@ async function loadDataHealth(forceMessage = false) {
       <div class="backup-health-stat"><div class="backup-health-label">Stored files</div><div class="backup-health-value">${Number(data.files.upload_count).toLocaleString()}</div><div class="backup-health-note">${escapeHtml(data.files.upload_size)}</div></div>
       <div class="backup-health-stat"><div class="backup-health-label">Free space</div><div class="backup-health-value">${escapeHtml(data.disk.free)}</div><div class="backup-health-note">${data.files.missing_count} missing · ${data.files.untracked_count} untracked</div></div>`;
     const notes = [...(data.issues || [])];
-    if (data.files.archived_raw_reference_count) notes.push(`${Number(data.files.archived_raw_reference_count).toLocaleString()} intentionally deleted raw photo reference(s) were safely excluded from missing-file checks.`);
+    const archivedNote = data.files.archived_raw_reference_count
+      ? `${Number(data.files.archived_raw_reference_count).toLocaleString()} intentionally deleted raw photo reference(s) were safely excluded from missing-file checks.`
+      : '';
     if (!data.database.snapshot_supported) notes.push('This external database requires its own database-server backup tool.');
-    message.innerHTML = notes.length
+    message.innerHTML = (notes.length
       ? `<div class="backup-message warn">${notes.map(escapeHtml).join('<br>')}</div>`
-      : `<div class="backup-message">Database and tracked uploads are consistent. You can create a backup checkpoint.</div>`;
+      : `<div class="backup-message">Database and tracked uploads are consistent. You can create a backup checkpoint.</div>`)
+      + (archivedNote ? `<div class="backup-message">${escapeHtml(archivedNote)}</div>` : '');
     const relink = document.getElementById('data-health-relink');
     const groups = Object.entries(data.files.missing_by_category || {});
     const suggestions = data.files.relink_suggestions || [];
