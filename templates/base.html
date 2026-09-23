@@ -206,7 +206,7 @@
 <div class="modal-backdrop" id="delete-confirm-modal">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title">Confirm Delete</div>
+    <div class="modal-title" id="delete-confirm-title">Confirm Delete</div>
       <button class="modal-close" onclick="closeDeleteConfirm()">&times;</button>
     </div>
     <div style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;" id="delete-confirm-message">
@@ -230,10 +230,12 @@
 
   function requestDelete(opts) {
     _deleteConfirmState = opts;
-    document.getElementById('delete-confirm-message').textContent =
+    document.getElementById('delete-confirm-title').textContent = opts.title || 'Confirm Delete';
+    document.getElementById('delete-confirm-message').textContent = opts.message ||
       `Delete "${opts.label}"? This action cannot be undone.`;
     document.getElementById('delete-confirm-password').value = '';
     document.getElementById('delete-confirm-error').style.display = 'none';
+    document.getElementById('delete-confirm-btn').textContent = opts.buttonText || 'Delete';
     document.getElementById('delete-confirm-modal').classList.add('open');
     setTimeout(() => document.getElementById('delete-confirm-password').focus(), 50);
   }
@@ -251,10 +253,11 @@
     errBox.style.display = 'none';
     if (!password) { errBox.textContent = 'Delete password is required.'; errBox.style.display = 'block'; return; }
 
-    btn.disabled = true; btn.textContent = 'Deleting…';
+    const idleText = _deleteConfirmState.buttonText || 'Delete';
+    btn.disabled = true; btn.textContent = _deleteConfirmState.busyText || 'Deleting…';
     try {
       const res = await fetch(_deleteConfirmState.url, {
-        method: 'DELETE',
+        method: _deleteConfirmState.method || 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password })
       });
@@ -266,12 +269,12 @@
       }
       const onSuccess = _deleteConfirmState.onSuccess;
       closeDeleteConfirm();
-      if (onSuccess) onSuccess();
+      if (onSuccess) onSuccess(data);
     } catch (e) {
       errBox.textContent = 'Network error — please try again.';
       errBox.style.display = 'block';
     } finally {
-      btn.disabled = false; btn.textContent = 'Delete';
+      btn.disabled = false; btn.textContent = idleText;
     }
   }
 </script>

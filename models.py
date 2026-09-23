@@ -455,15 +455,14 @@ class TowerPhoto(db.Model):
     # mistake) get caught and rejected instead of creating a duplicate
     # row and a duplicate copy of the file on disk.
     content_hash = db.Column(db.String(64), nullable=True, index=True)
-    # Set once a defect gets marked on this photo — a real second copy of
-    # the file living under .../<tower>/defects/ instead of .../raw/, so
-    # the raw copy can be deleted later without losing what a marked
-    # defect depends on. Empty until that first defect is marked.
+    # Set once an RGB defect or thermal measurement is saved — a real,
+    # full-quality evidence copy living under .../<tower>/defects/ instead
+    # of .../raw/. Thermal bytes remain unchanged so radiometric metadata
+    # survives completed-tower raw cleanup.
     defect_copy_path = db.Column(db.String(255), nullable=True)
-    # True once the raw/ copy has actually been deleted from disk — at
-    # that point image_url falls back to defect_copy_path if there is
-    # one, or the photo has no viewable image left at all if there isn't
-    # (meaning it never had a defect, so there was nothing to preserve).
+    # True once the raw/ copy has actually been deleted from storage. At
+    # that point image_url falls back to the preserved finding copy, or
+    # the clean archived photo intentionally has no viewable media.
     raw_deleted = db.Column(db.Boolean, default=False)
     # A small (~480px) JPEG generated right after upload — the grid view
     # loads this instead of the multi-MB drone original, which is what

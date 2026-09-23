@@ -15,10 +15,13 @@ import os
 import shutil
 
 import settings as app_settings
-from models import db, ActivityLog, User, Project, TowerDefect, TowerPhoto, Line, PilotLocation, Division, TowerInspectionStatus, InspectionComponent, InspectionDefectType, BackgroundJob, AppSetting, SystemHealthSnapshot, ServiceHeartbeat
+from models import db, ActivityLog, User, Project, TowerDefect, TowerPhoto, Line, PilotLocation, Division, TowerInspectionStatus, InspectionComponent, InspectionDefectType, BackgroundJob, AppSetting, SystemHealthSnapshot, ServiceHeartbeat, ThermalPoint, DefectResolutionEvent, TowerReport, AiInspectionSummary
 import json
 from sqlalchemy import text as sql_text
+from sqlalchemy.orm import selectinload
 from storage_cleanup import delete_stored_files
+from storage_service import get_storage
+from tower_storage import format_bytes, preserve_finding_photo, safe_stored_size
 
 settings_bp = Blueprint('settings_bp', __name__)
 
@@ -96,9 +99,12 @@ def api_inspection_quality():
             item = counts[photo.line_id]
             item['photos'] += 1
             item['thermal' if photo.is_thermal_image() else 'rgb'] += 1
-            if not _quality_file_exists(photo.display_image_path()):
+            active_defects = any(not defect.deleted_at for defect in photo.defects)
+            has_finding = bool(active_defects or photo.thermal_points)
+            intentionally_archived_clean = bool(photo.raw_deleted and not has_finding)
+            if not intentionally_archived_clean and not _quality_file_exists(photo.display_image_path()):
                 item['missing'] += 1
-            if not _quality_file_exists(photo.thumbnail_path):
+            if not intentionally_archived_clean and not _quality_file_exists(photo.thumbnail_path):
                 item['thumbs'] += 1
     def defect_counts(*extra):
         if not line_ids:
@@ -671,21 +677,251 @@ def api_settings_division_lines(division_id):
 
 @settings_bp.route('/api/settings/lines/<int:line_id>/towers', methods=['GET'])
 def api_settings_line_towers(line_id):
-    """Every tower that actually has data on it (at least one uploaded
-    photo) — a tower_label that only exists in the KML with nothing
-    uploaded yet has nothing to delete, so it's not listed here."""
+    """Tower storage inventory with review and evidence-retention status."""
     guard = _require_admin()
     if guard:
         return guard
     line = Line.query.get_or_404(line_id)
 
-    towers = {}
-    for photo in TowerPhoto.query.filter_by(line_id=line_id).all():
-        t = towers.setdefault(photo.tower_label, {'label': photo.tower_label, 'photo_count': 0, 'defect_count': 0})
-        t['photo_count'] += 1
-        t['defect_count'] += sum(1 for defect in photo.defects if not defect.deleted_at)
-    rows = sorted(towers.values(), key=lambda t: t['label'])
+    photos = (TowerPhoto.query.filter_by(line_id=line_id)
+              .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points))
+              .order_by(TowerPhoto.id.asc()).all())
+    statuses = {row.tower_label: row for row in TowerInspectionStatus.query.filter_by(line_id=line_id).all()}
+    grouped = {}
+    for photo in photos:
+        grouped.setdefault(photo.tower_label, []).append(photo)
+    labels = set(grouped) | set(statuses)
+    storage = get_storage()
+    rows = [_tower_storage_inventory(line_id, label, grouped.get(label, []), statuses.get(label), storage)
+            for label in labels]
+    rows.sort(key=lambda row: _natural_label_key(row['label']))
     return jsonify({'line_name': line.name, 'towers': rows})
+
+
+def _natural_label_key(value):
+    import re
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r'(\d+)', str(value or ''))]
+
+
+def _tower_storage_inventory(line_id, tower_label, photos=None, status=None, storage=None):
+    storage = storage or get_storage()
+    if photos is None:
+        photos = (TowerPhoto.query.filter_by(line_id=line_id, tower_label=tower_label)
+                  .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points)).all())
+    if status is None:
+        status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+
+    sizes = {'raw': 0, 'evidence': 0, 'thumbnails': 0}
+    seen = set()
+    counts = {'rgb': 0, 'thermal': 0, 'defects': 0, 'thermal_points': 0,
+              'marked_rgb': 0, 'marked_thermal': 0, 'raw_files': 0,
+              'evidence_files': 0, 'archived_photos': 0}
+    estimated_freed = 0
+
+    def add_size(kind, path):
+        normalized = str(path or '').replace('\\', '/').lstrip('/')
+        if not normalized or normalized in seen:
+            return 0
+        seen.add(normalized)
+        value = safe_stored_size(storage, normalized)
+        sizes[kind] += value
+        return value
+
+    for photo in photos:
+        thermal = photo.is_thermal_image()
+        counts['thermal' if thermal else 'rgb'] += 1
+        active_defects = [defect for defect in photo.defects if not defect.deleted_at]
+        counts['defects'] += len(active_defects)
+        counts['thermal_points'] += len(photo.thermal_points)
+        marked = bool(active_defects or photo.thermal_points)
+        if marked:
+            counts['marked_thermal' if thermal else 'marked_rgb'] += 1
+
+        raw_size = add_size('raw', photo.image_path)
+        evidence_size = add_size('evidence', photo.defect_copy_path)
+        thumbnail_size = add_size('thumbnails', photo.thumbnail_path)
+        if raw_size:
+            counts['raw_files'] += 1
+            # A finding without a preserved copy needs one full-quality copy
+            # before its raw path can be removed, so that operation does not
+            # reclaim the image's bytes yet.
+            if not marked or evidence_size:
+                estimated_freed += raw_size
+            if not marked:
+                estimated_freed += thumbnail_size
+        if evidence_size:
+            counts['evidence_files'] += 1
+        if photo.raw_deleted:
+            counts['archived_photos'] += 1
+
+    total = sum(sizes.values())
+    done = bool(status and status.inspection_done)
+    return {
+        'label': tower_label, 'inspection_done': done,
+        'photo_count': len(photos), 'rgb_count': counts['rgb'], 'thermal_count': counts['thermal'],
+        'defect_count': counts['defects'], 'thermal_point_count': counts['thermal_points'],
+        'marked_rgb_count': counts['marked_rgb'], 'marked_thermal_count': counts['marked_thermal'],
+        'raw_file_count': counts['raw_files'], 'evidence_file_count': counts['evidence_files'],
+        'archived_photo_count': counts['archived_photos'],
+        'raw_bytes': sizes['raw'], 'evidence_bytes': sizes['evidence'],
+        'thumbnail_bytes': sizes['thumbnails'], 'total_bytes': total,
+        'estimated_freed_bytes': estimated_freed,
+        'raw_size': format_bytes(sizes['raw']), 'evidence_size': format_bytes(sizes['evidence']),
+        'thumbnail_size': format_bytes(sizes['thumbnails']), 'total_size': format_bytes(total),
+        'estimated_freed_size': format_bytes(estimated_freed),
+        'can_delete_raw': done and counts['raw_files'] > 0,
+        'has_findings': bool(counts['defects'] or counts['thermal_points'] or counts['evidence_files']),
+    }
+
+
+@settings_bp.route('/api/settings/lines/<int:line_id>/towers/<path:tower_label>/raw-images', methods=['DELETE'])
+def api_settings_delete_tower_raw_images(line_id, tower_label):
+    """Delete completed-tower raw data while retaining all finding evidence."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+    data = request.get_json(force=True, silent=True) or {}
+    if not app_settings.verify_delete_password((data.get('password') or '').strip()):
+        return jsonify({'error': 'Incorrect delete password.'}), 403
+
+    status = TowerInspectionStatus.query.filter_by(line_id=line_id, tower_label=tower_label).first()
+    if not status or not status.inspection_done:
+        return jsonify({'error': 'Raw images can be deleted only after this tower is marked Inspection Done.'}), 409
+
+    photos = (TowerPhoto.query.filter_by(line_id=line_id, tower_label=tower_label)
+              .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points)).all())
+    if not photos:
+        return jsonify({'error': 'No uploaded photos were found for this tower.'}), 404
+
+    storage = get_storage()
+    deleted_raw = deleted_thumbnails = preserved_rgb = preserved_thermal = 0
+    freed_bytes = 0
+    warnings = []
+    for photo in photos:
+        active_defects = [defect for defect in photo.defects if not defect.deleted_at]
+        has_finding = bool(active_defects or photo.thermal_points)
+        raw_exists = bool(photo.image_path and storage.exists(photo.image_path))
+
+        if has_finding:
+            if not preserve_finding_photo(photo):
+                warnings.append(f'Photo {photo.id}: evidence copy could not be verified; raw image was kept.')
+                continue
+            if photo.is_thermal_image():
+                preserved_thermal += 1
+            else:
+                preserved_rgb += 1
+
+        if raw_exists:
+            raw_size = safe_stored_size(storage, photo.image_path)
+            try:
+                removed = storage.delete(photo.image_path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                warnings.append(f'Photo {photo.id}: raw deletion failed ({exc}).')
+                continue
+            if removed:
+                deleted_raw += 1
+                freed_bytes += raw_size
+
+        if not photo.image_path or not storage.exists(photo.image_path):
+            photo.raw_deleted = True
+
+        # Clean-image thumbnails are no longer useful once their source is
+        # intentionally archived. Marked thumbnails remain for fast browsing.
+        if not has_finding and photo.thumbnail_path:
+            thumbnail_size = safe_stored_size(storage, photo.thumbnail_path)
+            try:
+                removed = storage.delete(photo.thumbnail_path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                warnings.append(f'Photo {photo.id}: thumbnail deletion failed ({exc}).')
+            else:
+                if removed:
+                    deleted_thumbnails += 1
+                    freed_bytes += thumbnail_size
+                if not storage.exists(photo.thumbnail_path):
+                    photo.thumbnail_path = None
+
+    ActivityLog.log(
+        action='archive_tower_raw_images', entity_type='Line',
+        entity_name=f'{line.name} — Tower {tower_label}',
+        performed_by=session.get('user_name', ''), role=session.get('role', ''),
+        details=(f'Deleted {deleted_raw} raw image(s) and {deleted_thumbnails} clean thumbnail(s); '
+                 f'preserved {preserved_rgb} RGB and {preserved_thermal} thermal finding image(s); '
+                 f'freed {freed_bytes} bytes'))
+    db.session.commit()
+    inventory = _tower_storage_inventory(line_id, tower_label, photos, status, storage)
+    return jsonify({
+        'ok': True, 'deleted_raw_images': deleted_raw,
+        'deleted_clean_thumbnails': deleted_thumbnails,
+        'preserved_rgb_images': preserved_rgb, 'preserved_thermal_images': preserved_thermal,
+        'freed_bytes': freed_bytes, 'freed_size': format_bytes(freed_bytes),
+        'warnings': warnings, 'tower': inventory,
+    })
+
+
+@settings_bp.route('/api/settings/lines/<int:line_id>/towers/<path:tower_label>/findings', methods=['DELETE'])
+def api_settings_delete_tower_findings(line_id, tower_label):
+    """Permanently delete retained finding images and their markings."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    line = Line.query.get_or_404(line_id)
+    data = request.get_json(force=True, silent=True) or {}
+    if not app_settings.verify_delete_password((data.get('password') or '').strip()):
+        return jsonify({'error': 'Incorrect delete password.'}), 403
+
+    photos = (TowerPhoto.query.filter_by(line_id=line_id, tower_label=tower_label)
+              .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points)).all())
+    if not photos:
+        return jsonify({'error': 'No uploaded photos were found for this tower.'}), 404
+
+    stored_paths = set()
+    defect_count = thermal_point_count = 0
+    for photo in photos:
+        defect_count += len(photo.defects)
+        thermal_point_count += len(photo.thermal_points)
+        stored_paths.update(filter(None, (photo.defect_copy_path,)))
+        stored_paths.update(
+            event.evidence_image_path
+            for defect in photo.defects for event in defect.resolution_events
+            if event.evidence_image_path)
+        for defect in list(photo.defects):
+            db.session.delete(defect)
+        for point in list(photo.thermal_points):
+            db.session.delete(point)
+        photo.defect_copy_path = None
+        # If raw data was already archived, the thumbnail is also finding
+        # evidence and must not survive this explicit permanent purge.
+        if photo.raw_deleted and photo.thumbnail_path:
+            stored_paths.add(photo.thumbnail_path)
+            photo.thumbnail_path = None
+
+    reports = TowerReport.query.filter_by(line_id=line_id, tower_label=tower_label).all()
+    for report in reports:
+        stored_paths.add(report.report_path)
+        db.session.delete(report)
+    summaries = AiInspectionSummary.query.filter_by(line_id=line_id, tower_label=tower_label).all()
+    for summary in summaries:
+        db.session.delete(summary)
+
+    ActivityLog.log(
+        action='delete_tower_findings', entity_type='Line',
+        entity_name=f'{line.name} — Tower {tower_label}',
+        performed_by=session.get('user_name', ''), role=session.get('role', ''),
+        details=(f'Permanently deleted {defect_count} defect marking(s), '
+                 f'{thermal_point_count} thermal measurement(s), {len(reports)} report(s), '
+                 f'and {len(summaries)} AI summary record(s)'))
+    db.session.commit()
+    cleanup = delete_stored_files(stored_paths)
+    inventory = _tower_storage_inventory(line_id, tower_label, photos, None, get_storage())
+    return jsonify({
+        'ok': True, 'deleted_defects': defect_count,
+        'deleted_thermal_points': thermal_point_count,
+        'deleted_reports': len(reports), 'deleted_ai_summaries': len(summaries),
+        'deleted_files': cleanup['removed'], 'cleanup_errors': cleanup['errors'],
+        'tower': inventory,
+    })
 
 
 @settings_bp.route('/api/settings/lines/<int:line_id>/towers/<path:tower_label>', methods=['DELETE'])
@@ -731,9 +967,18 @@ def api_settings_delete_tower(line_id, tower_label):
     if status:
         db.session.delete(status)
 
+    reports = TowerReport.query.filter_by(line_id=line_id, tower_label=tower_label).all()
+    for report in reports:
+        stored_paths.add(report.report_path)
+        db.session.delete(report)
+    summaries = AiInspectionSummary.query.filter_by(line_id=line_id, tower_label=tower_label).all()
+    for summary in summaries:
+        db.session.delete(summary)
+
     ActivityLog.log(action='delete_tower', entity_type='Line', entity_name=f'{line.name} — Tower {tower_label}',
                      performed_by=session.get('user_name', ''), role=session.get('role', ''),
-                     details=f'Deleted {deleted_photo_count} photo(s), {deleted_defect_count} defect(s)')
+                     details=(f'Deleted {deleted_photo_count} photo(s), {deleted_defect_count} defect(s), '
+                              f'{len(reports)} report(s) and {len(summaries)} AI summary record(s)'))
     db.session.commit()
     cleanup = delete_stored_files(stored_paths)
     if cleanup['errors']:

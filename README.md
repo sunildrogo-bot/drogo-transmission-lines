@@ -1,4 +1,4 @@
-Update 32 (v1.32.0): see [UPDATE_32.md](UPDATE_32.md) for Client UI changes, email setup and upgrade instructions.
+Update 33 (v1.33.0): see [UPDATE_33.md](UPDATE_33.md) for completed-tower storage cleanup and RGB/thermal evidence retention. Update 32 details remain in [UPDATE_32.md](UPDATE_32.md).
 
 Update 31 (v1.31.0): see [UPDATE_31.md](UPDATE_31.md) for changes and upgrade instructions.
 

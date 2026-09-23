@@ -12,7 +12,6 @@ system shared by every module:
 Register in app.py with: app.register_blueprint(projects_bp)
 """
 import os
-import shutil
 import math
 import json
 import re
@@ -23,7 +22,6 @@ import csv
 import io
 import numpy as np
 from datetime import datetime, timedelta
-from pathlib import PurePosixPath
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for, current_app, Response, send_file
 from werkzeug.utils import secure_filename
 from sqlalchemy.orm import selectinload
@@ -59,6 +57,7 @@ def _storage_working_path(value):
         return ''
 from notification_service import admin_user_ids, notify_user, notify_users
 from storage_service import get_storage, stored_url
+from tower_storage import preserve_finding_photo
 
 projects_bp = Blueprint('projects_bp', __name__)
 
@@ -497,38 +496,8 @@ def _save_tower_photo(file_storage, project, division, line, tower_label, allowe
 
 
 def _duplicate_photo_for_defects(photo):
-    """Copies a TowerPhoto's raw file into that same tower's defects/
-    folder the first time a defect is marked on it — a real second copy
-    on disk, not just a second DB reference to the same file. This is
-    what lets raw/ get cleaned up later without losing the evidence a
-    marked defect depends on. Idempotent: does nothing if already copied
-    (photo.defect_copy_path already set) or if the raw file is missing.
-    Returns True if a copy exists after this call (whether just made or
-    already there), False if it couldn't be made."""
-    if photo.defect_copy_path:
-        return True
-    if not photo.image_path:
-        return False
-    static_root = os.path.realpath(current_app.static_folder)
-    src = _storage_working_path(photo.display_image_path())
-    if not src:
-        return False
-    raw_dir, filename = os.path.split(photo.image_path)
-    # .../<tower>/raw  ->  .../<tower>/defects
-    defects_rel_dir = re.sub(r'/raw$', '/defects', raw_dir)
-    if defects_rel_dir == raw_dir:
-        # Old flat-path photos (uploaded before this folder structure
-        # existed) have no /raw suffix to swap — give them their own
-        # defects/ sibling next to wherever they actually live instead.
-        defects_rel_dir = raw_dir + '_defects'
-    dest_dir = os.path.join(static_root, *PurePosixPath(defects_rel_dir).parts)
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, filename)
-    if not os.path.isfile(dest):
-        shutil.copy2(src, dest)
-    photo.defect_copy_path = f"{defects_rel_dir}/{filename}"
-    get_storage().publish(photo.defect_copy_path, dest)
-    return True
+    """Keep a full-quality RGB or radiometric thermal evidence copy."""
+    return preserve_finding_photo(photo)
 
 
 def _haversine_km(lat1, lng1, lat2, lng2):
@@ -2025,6 +1994,7 @@ def api_list_tower_photos(line_id):
         return jsonify({'error': 'Invalid pagination values.'}), 400
     query = (TowerPhoto.query
              .filter_by(line_id=line_id, tower_label=tower_label)
+             .filter(db.or_(TowerPhoto.raw_deleted.is_(False), TowerPhoto.defect_copy_path.isnot(None)))
              .options(selectinload(TowerPhoto.defects), selectinload(TowerPhoto.thermal_points)))
     if after_id:
         query = query.filter(TowerPhoto.id > after_id)
@@ -2500,7 +2470,9 @@ def api_tower_summary(line_id):
         .group_by(TowerPhoto.tower_label).all()
     )
     photo_counts = dict(db.session.query(TowerPhoto.tower_label, db.func.count(TowerPhoto.id))
-                        .filter(TowerPhoto.line_id == line_id, TowerPhoto.raw_deleted.is_(False))
+                        .filter(TowerPhoto.line_id == line_id,
+                                db.or_(TowerPhoto.raw_deleted.is_(False),
+                                       TowerPhoto.defect_copy_path.isnot(None)))
                         .group_by(TowerPhoto.tower_label).all())
     inspection_rows = TowerInspectionStatus.query.filter_by(line_id=line_id).all()
     inspection_done = {r.tower_label: bool(r.inspection_done) for r in inspection_rows}
@@ -3746,6 +3718,12 @@ def api_create_thermal_point(photo_id):
         created_by=session.get('user_name', ''),
     )
     db.session.add(point)
+    # A measured thermal image is permanent inspection evidence. Preserve
+    # the original R-JPEG bytes (including radiometric metadata) before a
+    # completed tower is ever eligible for raw-image cleanup.
+    if not _duplicate_photo_for_defects(photo):
+        db.session.rollback()
+        return jsonify({'error': 'The thermal measurement could not be saved because its evidence image could not be preserved.'}), 500
     db.session.commit()
     return jsonify(point.to_dict()), 201
 

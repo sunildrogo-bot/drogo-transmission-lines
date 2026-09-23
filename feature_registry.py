@@ -1,7 +1,7 @@
 """Required-feature registry used by Settings and the safe release builder."""
 from pathlib import Path
 
-APPLICATION_VERSION = '1.32.0'
+APPLICATION_VERSION = '1.33.0'
 
 FEATURES = (
     ('image_review_reliability', 'Current-photo response isolation', 'templates/project_map.html', 'photoViewIsCurrent'),
@@ -48,6 +48,8 @@ FEATURES = (
     ('offsite_backup', 'Streaming restore-verified offsite checkpoints', 'offsite_backup.py', 'Completed and restore-verified'),
     ('phase1_verification', 'Cross-platform Phase 1 verification', 'scripts/verify_phase1.py', 'UPDATE 30 PHASE 1 VERIFICATION: PASSED'),
     ('verified_sqlite_snapshot', 'Verified SQLite backup helper', 'scripts/snapshot_sqlite.py', 'Integrity: ok'),
+    ('completed_tower_storage', 'Completed tower evidence retention', 'settings_routes.py', 'api_settings_delete_tower_raw_images'),
+    ('thermal_evidence_retention', 'Measured thermal evidence retention', 'projects_routes.py', 'thermal measurement could not be saved'),
 )
 
 

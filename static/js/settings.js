@@ -1191,14 +1191,52 @@ async function tbLoadTowers(lineId, lineName) {
     const towers = data.towers || [];
     if (!towers.length) { body.innerHTML = `<div class="tb-empty">No photos uploaded on this line yet — nothing to delete.</div>`; return; }
     body.innerHTML = towers.map(t => `
-      <div class="tb-row">
+      <div class="tb-row tb-tower-row">
         <div class="tb-row-main" style="cursor:default;">
-          <div class="tb-row-name">Tower ${escapeHtml(t.label)}</div>
-          <div class="tb-row-sub">${t.photo_count} photo${t.photo_count !== 1 ? 's' : ''} · ${t.defect_count} defect${t.defect_count !== 1 ? 's' : ''}</div>
+          <div class="tb-tower-head"><div class="tb-row-name">Tower ${escapeHtml(t.label)}</div><span class="tb-status ${t.inspection_done ? 'done' : 'pending'}">${t.inspection_done ? 'INSPECTION DONE' : 'NOT COMPLETED'}</span></div>
+          <div class="tb-tower-stats"><span>${t.rgb_count} RGB</span><span>${t.thermal_count} thermal</span><span>${t.defect_count} defect${t.defect_count !== 1 ? 's' : ''}</span><span>${t.thermal_point_count} thermal measurement${t.thermal_point_count !== 1 ? 's' : ''}</span></div>
+          <div class="tb-storage-line"><b>Total ${escapeHtml(t.total_size)}</b> · Raw ${escapeHtml(t.raw_size)} · Preserved findings ${escapeHtml(t.evidence_size)} · Estimated recovery ${escapeHtml(t.estimated_freed_size)}</div>
         </div>
-        <button type="button" class="tb-delete-btn" onclick="requestDelete({url:'/api/settings/lines/${lineId}/towers/${encodeURIComponent(t.label)}', label:'Tower ${escapeHtml(t.label).replace(/'/g, "\\'")} (all photos and defects)', onSuccess: () => tbLoadTowers(${lineId}, '${escapeHtml(lineName).replace(/'/g, "\\'")}')})">Delete</button>
+        <div class="tb-actions">
+          <button type="button" class="tb-action-btn raw" ${t.can_delete_raw ? '' : 'disabled'} title="${t.inspection_done ? (t.raw_file_count ? 'Remove raw files and retain every marked RGB and measured thermal image' : 'Raw images already removed') : 'Mark Inspection Done before deleting raw images'}" onclick="tbDeleteRawImages(${lineId}, '${escapeHtml(t.label).replace(/'/g, "\\'")}', '${escapeHtml(lineName).replace(/'/g, "\\'")}')">${t.raw_file_count ? 'Delete Raw Images' : 'Raw Removed'}</button>
+          <button type="button" class="tb-action-btn findings" ${t.has_findings ? '' : 'disabled'} title="Permanently remove preserved defect images, defect markings and thermal measurements" onclick="tbDeleteFindings(${lineId}, '${escapeHtml(t.label).replace(/'/g, "\\'")}', '${escapeHtml(lineName).replace(/'/g, "\\'")}')">Delete Findings &amp; Markings</button>
+        </div>
       </div>`).join('');
   } catch (e) {
     body.innerHTML = `<div class="tb-empty">Could not load towers.</div>`;
   }
+}
+
+function tbDeleteRawImages(lineId, towerLabel, lineName) {
+  requestDelete({
+    url: `/api/settings/lines/${lineId}/towers/${encodeURIComponent(towerLabel)}/raw-images`,
+    label: `Tower ${towerLabel} raw images`,
+    title: 'Delete Raw Images',
+    message: `Delete raw images for Tower ${towerLabel}? All RGB defect images, measured thermal images and their markings will be verified and preserved. Unmarked originals will be permanently removed.`,
+    buttonText: 'Delete Raw Images',
+    busyText: 'Preserving findings…',
+    onSuccess: data => {
+      const warning = (data.warnings || []).length ? `\nWarnings: ${(data.warnings || []).join(' ')}` : '';
+      alert(`Raw cleanup completed. Recovered ${data.freed_size || '0 B'}. Preserved ${data.preserved_rgb_images || 0} RGB and ${data.preserved_thermal_images || 0} thermal finding images.${warning}`);
+      tbLoadTowers(lineId, lineName);
+      loadStorageSummary();
+    },
+  });
+}
+
+function tbDeleteFindings(lineId, towerLabel, lineName) {
+  requestDelete({
+    url: `/api/settings/lines/${lineId}/towers/${encodeURIComponent(towerLabel)}/findings`,
+    label: `Tower ${towerLabel} findings and markings`,
+    title: 'Permanently Delete Findings',
+    message: `Permanently delete Tower ${towerLabel} preserved RGB/thermal evidence, defect markings, thermal measurements, rectification evidence, generated reports and AI summary? This cannot be undone.`,
+    buttonText: 'Delete Findings & Markings',
+    busyText: 'Deleting findings…',
+    onSuccess: data => {
+      const errors = (data.cleanup_errors || []).length ? `\nSome files need manual cleanup: ${(data.cleanup_errors || []).join(' ')}` : '';
+      alert(`Deleted ${data.deleted_defects || 0} defect markings and ${data.deleted_thermal_points || 0} thermal measurements.${errors}`);
+      tbLoadTowers(lineId, lineName);
+      loadStorageSummary();
+    },
+  });
 }
