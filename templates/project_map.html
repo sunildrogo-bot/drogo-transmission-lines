@@ -587,7 +587,7 @@
      defect panel sit outside that layer and stay fixed-size. The defect
      form itself is a full-height drawer sliding in from the screen's left
      edge, not a floating card. ── -->
-<div class="photo-lightbox" id="photo-lightbox" onclick="if(event.target===this) closePhotoLightbox()">
+<div class="photo-lightbox" id="photo-lightbox" onclick="onLightboxBackdropClick(event)">
   <button class="lightbox-close" onclick="closePhotoLightbox()" title="Close">✕</button>
   <div class="lightbox-main-row">
     <button class="lightbox-nav lightbox-prev" id="lightbox-prev" onclick="lightboxPrev()" title="Previous">‹</button>
@@ -2489,10 +2489,49 @@ function lightboxPrev() {
   renderLightboxImage();
 }
 
+// ── Backdrop-click guard ──────────────────────────────────────────────
+// The lightbox used to close on ANY click whose target was the backdrop.
+// Browsers report a press-on-image / release-off-image drag as a click on
+// the common ancestor (the backdrop), and a second click right after Save
+// lands on the backdrop once the drawer slides away — both closed the
+// photo mid-annotation. Now it only closes when the press ALSO started on
+// the backdrop, and never while marking, the form is open, a save is in
+// flight, or within a short window after a save finishes.
+let lightboxPressOnBackdrop = false;
+let defectSaveInFlight = false;
+let suppressBackdropCloseUntil = 0;
+
+document.getElementById('photo-lightbox').addEventListener('pointerdown', (e) => {
+  lightboxPressOnBackdrop = (e.target === e.currentTarget);
+});
+
+function isDefectPanelOpen() {
+  const p = document.getElementById('lightbox-defect-panel');
+  return !!(p && p.classList.contains('open'));
+}
+
+function onLightboxBackdropClick(e) {
+  const pressed = lightboxPressOnBackdrop;
+  lightboxPressOnBackdrop = false;
+  if (e.target !== e.currentTarget || !pressed) return;
+  if (markDefectMode || thermalMeasureMode || isDefectPanelOpen() || defectSaveInFlight) return;
+  if (Date.now() < suppressBackdropCloseUntil) return;
+  closePhotoLightbox();
+}
+
 document.addEventListener('keydown', (e) => {
   const lb = document.getElementById('photo-lightbox');
   if (!lb || !lb.classList.contains('open')) return;
-  if (e.key === 'Escape') closePhotoLightbox();
+  // Keys typed into the defect form / thermal params (arrow keys on a
+  // <select>, Escape to dismiss a dropdown) must not switch or close the photo.
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (e.key === 'Escape') {
+    if (isDefectPanelOpen()) { cancelDefectForm(); return; }
+    if (defectSaveInFlight) return;
+    closePhotoLightbox();
+  }
+  if (isDefectPanelOpen() || defectSaveInFlight) return;
   if (e.key === 'ArrowRight') lightboxNext();
   if (e.key === 'ArrowLeft') lightboxPrev();
 });
@@ -3171,6 +3210,8 @@ async function submitDefectForm() {
   };
 
   const btn = document.getElementById('df-submit-btn');
+  if (defectSaveInFlight) return;  // ignore double-click while the VPS round-trip is pending
+  defectSaveInFlight = true;
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const res = await fetch(`/api/tower-photos/${photo.id}/defects`, {
@@ -3194,7 +3235,10 @@ async function submitDefectForm() {
     errBox.textContent = 'Network error — please try again.';
     errBox.style.display = 'block';
   } finally {
-    btn.disabled = false; btn.textContent = 'Save Defect';
+    defectSaveInFlight = false;
+    // Swallow any trailing click that lands on the backdrop as the drawer slides out.
+    suppressBackdropCloseUntil = Date.now() + 600;
+    btn.disabled = false; btn.textContent = 'Save';
   }
 }
 
