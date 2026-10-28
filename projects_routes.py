@@ -514,7 +514,7 @@ def _haversine_km(lat1, lng1, lat2, lng2):
 # tolerance. A photo with no GPS EXIF data at all is rejected too (see
 # api_upload_tower_photo) — drone photos reliably carry it, so a photo
 # without it can't be verified as belonging to this tower.
-TOWER_PHOTO_GPS_BUFFER_M = 70
+TOWER_PHOTO_GPS_BUFFER_M = 100
 
 
 def _extract_gps_from_image(file_storage):
